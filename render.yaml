@@ -6,24 +6,26 @@ services:
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: SUPABASE_URL
-        value: https://czviutsdcyvjanwiluzy.supabase.co
+        sync: false
       - key: SUPABASE_ANON_KEY
-        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN6dml1dHNkY3l2amFud2lsdXp5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczMzMzMjIsImV4cCI6MjA5MjkwOTMyMn0.MB0HocnlAdoZn-065wU3MGPPAk3Nf5MMmCmmpmZAvKo
+        sync: false
       - key: SUPABASE_SERVICE_KEY
-        value: AJOUTER_DEPUIS_SUPABASE_DASHBOARD
+        sync: false
       - key: OPENROUTER_API_KEY
-        value: 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
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
       - key: SMTP_HOST
-        value: smtp.gmail.com
+        sync: false
       - key: SMTP_PORT
-        value: "587"
+        sync: false
       - key: SMTP_USER
-        value: webdesigntognoli@gmail.com
+        sync: false
       - key: SMTP_PASSWORD
-        value: xbglixdnpgskhepe
+        sync: false
       - key: JWT_SECRET_KEY
-        value: tognoli-crm-ai-super-secret-jwt-key-2024
+        sync: false
       - key: ADMIN_EMAIL
-        value: tognoli.wdesign@gmail.com
+        sync: false
       - key: ADMIN_PASSWORD
-        value: StognoliTwd12!
+        sync: false
