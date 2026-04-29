@@ -22,7 +22,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Lexarys API", description="Logiciel de prospection client pour avocats — conforme RIN", version="1.0.0", lifespan=lifespan)
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["https://tognoliwdesign-dot.github.io", "http://localhost:3000", "http://localhost:8080"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 app.include_router(auth_router)
 app.include_router(prospects_router)
