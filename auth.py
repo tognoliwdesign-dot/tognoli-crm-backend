@@ -1,83 +1,70 @@
+"""LEXARYS — Authentification JWT"""
 import os
-import jwt
 from datetime import datetime, timedelta
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr
-from database import get_admin_client
-from dotenv import load_dotenv
+from database import supabase
+from models import UserCreate
 
-load_dotenv()
-
-JWT_SECRET = os.getenv("JWT_SECRET_KEY", "tognoli-crm-secret")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-JWT_EXP_HOURS = int(os.getenv("JWT_EXPIRATION_HOURS", "24"))
+SECRET_KEY = os.getenv("SECRET_KEY", "lexarys-secret-key-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-security = HTTPBearer()
-router = APIRouter()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+router = APIRouter(prefix="/auth", tags=["auth"])
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user: dict
+def verify_password(plain, hashed): return pwd_context.verify(plain, hashed)
+def hash_password(password): return pwd_context.hash(password)
 
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
-
-def create_token(user_id: str, email: str, role: str) -> str:
-    payload = {
-        "sub": user_id, "email": email, "role": role,
-        "exp": datetime.utcnow() + timedelta(hours=JWT_EXP_HOURS),
-        "iat": datetime.utcnow(),
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-def decode_token(token: str) -> dict:
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    exc = HTTPException(status_code=401, detail="Token invalide ou expiré", headers={"WWW-Authenticate": "Bearer"})
     try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expiré")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Token invalide")
-
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    payload = decode_token(credentials.credentials)
-    db = get_admin_client()
-    result = db.table("users").select("*").eq("id", payload["sub"]).single().execute()
-    if not result.data:
-        raise HTTPException(status_code=401, detail="Utilisateur introuvable")
-    if not result.data.get("is_active"):
-        raise HTTPException(status_code=403, detail="Compte désactivé")
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id: raise exc
+    except JWTError:
+        raise exc
+    result = supabase.table("users").select("*").eq("id", user_id).single().execute()
+    if not result.data: raise exc
     return result.data
 
-async def require_admin(current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Accès admin requis")
-    return current_user
+@router.post("/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    result = supabase.table("users").select("*").eq("email", form_data.username).single().execute()
+    if not result.data: raise HTTPException(401, "Identifiants incorrects")
+    user = result.data
+    if not verify_password(form_data.password, user.get("password_hash", "")): raise HTTPException(401, "Identifiants incorrects")
+    token = create_access_token({"sub": user["id"]})
+    return {"access_token": token, "token_type": "bearer", "user": {"id": user["id"], "email": user["email"], "first_name": user.get("first_name"), "last_name": user.get("last_name"), "role": user.get("role", "avocat"), "barreau": user.get("barreau")}}
 
-@router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest):
-    db = get_admin_client()
-    result = db.table("users").select("*").eq("email", body.email).execute()
-    if not result.data:
-        raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
-    user = result.data[0]
-    if not verify_password(body.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
-    if not user.get("is_active", True):
-        raise HTTPException(status_code=403, detail="Compte désactivé")
-    token = create_token(user["id"], user["email"], user["role"])
-    return TokenResponse(access_token=token, user={"id": user["id"], "email": user["email"], "role": user["role"], "company_name": user.get("company_name", ""), "lead_limit": user.get("lead_limit", 100)})
+@router.post("/register")
+async def register(body: UserCreate):
+    existing = supabase.table("users").select("id").eq("email", body.email).execute()
+    if existing.data: raise HTTPException(400, "Email déjà utilisé")
+    data = {"email": body.email, "password_hash": hash_password(body.password), "first_name": body.first_name, "last_name": body.last_name, "role": body.role or "avocat", "barreau": body.barreau}
+    result = supabase.table("users").insert(data).execute()
+    user = result.data[0] if result.data else {}
+    token = create_access_token({"sub": user.get("id", "")})
+    return {"access_token": token, "token_type": "bearer", "user": user}
+
+@router.put("/change-password")
+async def change_password(body: dict, user=Depends(get_current_user)):
+    new_pwd = body.get("password")
+    if not new_pwd or len(new_pwd) < 6: raise HTTPException(400, "Mot de passe trop court")
+    supabase.table("users").update({"password_hash": hash_password(new_pwd)}).eq("id", user["id"]).execute()
+    return {"success": True}
 
 @router.get("/me")
-async def get_me(current_user: dict = Depends(get_current_user)):
-    return {"id": current_user["id"], "email": current_user["email"], "role": current_user["role"], "company_name": current_user.get("company_name", ""), "lead_limit": current_user.get("lead_limit", 100), "subscription_status": current_user.get("subscription_status", "trial")}
+async def me(user=Depends(get_current_user)):
+    return user
