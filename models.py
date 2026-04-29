@@ -1,93 +1,132 @@
+"""LEXARYS — Modèles Pydantic"""
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
-from datetime import datetime
-from enum import Enum
+from datetime import date, datetime
 
-class LeadStatus(str, Enum):
-    new = "new"
-    contacted = "contacted"
-    qualified = "qualified"
-    proposal = "proposal"
-    won = "won"
-    lost = "lost"
-
-class UserRole(str, Enum):
-    admin = "admin"
-    client = "client"
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
 
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
-    company_name: Optional[str] = ""
-    role: UserRole = UserRole.client
-    lead_limit: int = 100
+    full_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    role: str = "avocat"
+    barreau: Optional[str] = None
+    specialites: Optional[List[str]] = []
 
 class UserUpdate(BaseModel):
-    company_name: Optional[str] = None
     is_active: Optional[bool] = None
-    lead_limit: Optional[int] = None
-    subscription_status: Optional[str] = None
+    role: Optional[str] = None
 
-class LeadCreate(BaseModel):
+class ProspectCreate(BaseModel):
     company_name: str
-    contact_name: Optional[str] = ""
-    email: Optional[str] = ""
-    phone: Optional[str] = ""
-    website: Optional[str] = ""
-    sector: Optional[str] = ""
-    city: Optional[str] = ""
-    country: Optional[str] = "France"
-    notes: Optional[str] = ""
-    linkedin_url: Optional[str] = ""
-    source: Optional[str] = "manual"
-
-class LeadUpdate(BaseModel):
-    company_name: Optional[str] = None
+    siren: Optional[str] = None
+    siret: Optional[str] = None
     contact_name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
-    website: Optional[str] = None
-    sector: Optional[str] = None
     city: Optional[str] = None
+    postal_code: Optional[str] = None
+    country: str = "France"
+    naf_code: Optional[str] = None
+    naf_label: Optional[str] = None
+    effectif_tranche: Optional[str] = None
+    forme_juridique: Optional[str] = None
+    date_creation: Optional[date] = None
+    capital_social: Optional[int] = None
+    bodacc_procedure: Optional[str] = None
+    is_international: bool = False
+    is_multi_site: bool = False
+    has_litigation_history: bool = False
     notes: Optional[str] = None
-    status: Optional[LeadStatus] = None
-    score: Optional[int] = None
-    linkedin_url: Optional[str] = None
+    source: str = "manuel"
+    tags: Optional[List[str]] = []
+    assigned_to: Optional[str] = None
 
-class LeadStatusUpdate(BaseModel):
-    status: LeadStatus
+class ProspectUpdate(BaseModel):
+    status: Optional[str] = None
+    company_name: Optional[str] = None
+    siren: Optional[str] = None
+    siret: Optional[str] = None
+    naf_code: Optional[str] = None
+    naf_label: Optional[str] = None
+    effectif_tranche: Optional[str] = None
+    forme_juridique: Optional[str] = None
+    city: Optional[str] = None
+    postal_code: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    notes: Optional[str] = None
+    has_formal_refusal: Optional[bool] = None
+    consent_obtained: Optional[bool] = None
 
-class AIMessageRequest(BaseModel):
-    lead_id: str
-    message_type: str = "cold_email"
-    tone: Optional[str] = "professionnel"
-    language: Optional[str] = "fr"
+class ProspectStatusUpdate(BaseModel):
+    status: str
 
-class AIScoreRequest(BaseModel):
-    lead_id: str
+class ClientCreate(BaseModel):
+    client_type: str = "personne_morale"
+    company_name: Optional[str] = None
+    last_name: Optional[str] = None
+    first_name: Optional[str] = None
+    siren: Optional[str] = None
+    siret: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    postal_code: Optional[str] = None
+    status: str = "actif"
+    since_date: Optional[date] = None
+    is_confidential: bool = False
+    notes: Optional[str] = None
 
-class AIFollowupRequest(BaseModel):
-    lead_id: str
-    days_since_contact: int = 7
+class ClientUpdate(BaseModel):
+    status: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    notes: Optional[str] = None
+    end_date: Optional[date] = None
 
-class EmailSendRequest(BaseModel):
-    lead_id: str
-    subject: str
-    body: str
-    recipient_email: str
+class DossierCreate(BaseModel):
+    client_id: Optional[str] = None
+    reference: Optional[str] = None
+    titre: Optional[str] = None
+    type_dossier: Optional[str] = None
+    matiere: Optional[str] = None
+    juridiction: Optional[str] = None
+    partie_adverse: Optional[str] = None
+    partie_adverse_siren: Optional[str] = None
+    status: str = "ouvert"
+    date_ouverture: Optional[date] = None
+    notes: Optional[str] = None
 
-class EmailConfigUpdate(BaseModel):
-    daily_limit: Optional[int] = None
-    min_delay_seconds: Optional[int] = None
-    max_delay_seconds: Optional[int] = None
+class DossierUpdate(BaseModel):
+    status: Optional[str] = None
+    titre: Optional[str] = None
+    date_cloture: Optional[date] = None
+    description: Optional[str] = None
+    juridiction: Optional[str] = None
+    notes: Optional[str] = None
 
-class ScraperRequest(BaseModel):
-    sector: str
-    city: str
-    country: Optional[str] = "France"
-    max_results: Optional[int] = 20
+class ConflictCheckRequest(BaseModel):
+    entity_name: str
+    siren: Optional[str] = None
+    siret: Optional[str] = None
+    entity_type: str = "prospect"
+    prospect_id: Optional[str] = None
+    dossier_id: Optional[str] = None
 
-class CheckoutRequest(BaseModel):
-    plan: str
-    success_url: str
-    cancel_url: str
+class ConflictDecision(BaseModel):
+    check_id: str
+    decision: str
+    notes: Optional[str] = None
+
+class SireneSearchRequest(BaseModel):
+    q: str
+    postal_code: Optional[str] = None
+
+class BodaccSearchRequest(BaseModel):
+    siren: str
