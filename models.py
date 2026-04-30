@@ -1,4 +1,4 @@
-"""LEXARYS — Modèles Pydantic"""
+"""LEXARYS - Modèles Pydantic"""
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from datetime import date, datetime
