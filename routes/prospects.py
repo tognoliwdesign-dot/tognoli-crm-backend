@@ -92,7 +92,7 @@ async def log_contact(prospect_id: str, body: dict, user=Depends(get_current_use
     ex = supabase.table("prospects").select("nb_contacts,has_formal_refusal").eq("id", prospect_id).single().execute()
     if not ex.data: raise HTTPException(404, "Prospect introuvable")
     if ex.data.get("has_formal_refusal"): raise HTTPException(403, "Prospection bloquée — refus formel enregistré")
-    supabase.table("prospect_contacts").insert({"prospect_id": prospect_id, "user_id": user["id"], "contact_mode": body.get("contact_mode","email"), "contact_date": datetime.utcnow().isoformat()}).execute()
+    supabase.table("prospect_contacts").insert({"prospect_id": prospect_id, "user_id": user["id"], "contact_mode": body.get("contact_mode") or body.get("contact_type") or "email", "contact_date": datetime.utcnow().isoformat()}).execute()
     new_count = (ex.data.get("nb_contacts") or 0)+1
     supabase.table("prospects").update({"nb_contacts": new_count, "last_contact_at": datetime.utcnow().isoformat(), "updated_at": datetime.utcnow().isoformat()}).eq("id", prospect_id).execute()
     return {"nb_contacts": new_count}
