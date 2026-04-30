@@ -1,4 +1,4 @@
-"""LEXARYS — Routes Conflits d'Intérêts (Art. 4 RIN)"""
+"""LEXARYS - Routes Conflits d'Intérêts (Art. 4 RIN)"""
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime
 from database import supabase
