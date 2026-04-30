@@ -1,4 +1,4 @@
-"""LEXARYS — Routes Clients"""
+"""LEXARYS - Routes Clients"""
 from fastapi import APIRouter, HTTPException, Depends
 from database import supabase
 from models import ClientCreate, ClientUpdate
