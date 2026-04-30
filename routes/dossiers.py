@@ -1,4 +1,4 @@
-"""LEXARYS — Routes Dossiers"""
+"""LEXARYS - Routes Dossiers"""
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime, date
 from database import supabase
@@ -73,4 +73,4 @@ async def mark_conflict_checked(dossier_id: str, check_result: str = "vert", use
 async def delete_dossier(dossier_id: str, user=Depends(get_current_user)):
     supabase.table("dossiers").delete().eq("id", dossier_id).execute()
     return {"deleted": True}
-—
+-
