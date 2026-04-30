@@ -1,4 +1,4 @@
-"""LEXARYS — Routes Administration"""
+"""LEXARYS - Routes Administration"""
 from fastapi import APIRouter, HTTPException, Depends
 from database import supabase
 from auth import get_current_user, hash_password
