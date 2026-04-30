@@ -26,7 +26,8 @@ async def create_dossier(body: DossierCreate, user=Depends(get_current_user)):
     data = body.dict()
     data["avocat_id"] = user["id"]
     data["reference"] = data.get("reference") or _generate_reference()
-    if data.get("date_ouverture"): data["date_ouverture"] = str(data["date_ouverture"])
+    if data.get("date_ouverture"):
+        data["date_ouverture"] = str(data["date_ouverture"])
     result = supabase.table("dossiers").insert(data).execute()
     return result.data[0] if result.data else {}
 
@@ -52,7 +53,10 @@ async def get_dossier(dossier_id: str, user=Depends(get_current_user)):
 @router.put("/{dossier_id}")
 async def update_dossier(dossier_id: str, body: DossierUpdate, user=Depends(get_current_user)):
     data = {k: v for k, v in body.dict().items() if v is not None}
-    if "date_cloture" in data: data["date_cloture"] = str(data["date_cloture"])
+    if "date_cloture" in data:
+        data["date_cloture"] = str(data["date_cloture"])
+    if "date_ouverture" in data:
+        data["date_ouverture"] = str(data["date_ouverture"])
     result = supabase.table("dossiers").update(data).eq("id", dossier_id).execute()
     return result.data[0] if result.data else {}
 
@@ -69,3 +73,4 @@ async def mark_conflict_checked(dossier_id: str, check_result: str = "vert", use
 async def delete_dossier(dossier_id: str, user=Depends(get_current_user)):
     supabase.table("dossiers").delete().eq("id", dossier_id).execute()
     return {"deleted": True}
+—
