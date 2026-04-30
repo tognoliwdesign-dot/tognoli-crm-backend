@@ -106,9 +106,13 @@ class DossierCreate(BaseModel):
 class DossierUpdate(BaseModel):
     status: Optional[str] = None
     titre: Optional[str] = None
+    type_dossier: Optional[str] = None
+    client_id: Optional[str] = None
+    date_ouverture: Optional[date] = None
     date_cloture: Optional[date] = None
-    description: Optional[str] = None
     juridiction: Optional[str] = None
+    partie_adverse: Optional[str] = None
+    partie_adverse_siren: Optional[str] = None
     notes: Optional[str] = None
 
 class ConflictCheckRequest(BaseModel):
