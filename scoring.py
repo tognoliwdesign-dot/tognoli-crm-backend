@@ -1,4 +1,4 @@
-"""LEXARYS — Algorithme de scoring (100% algorithmique, sans IA)"""
+"""LEXARYS - Algorithme de scoring (100% algorithmique, sans IA)"""
 from dataclasses import dataclass
 from typing import Optional
 from datetime import date
@@ -39,7 +39,7 @@ def score_prospect(data: ProspectData) -> ScoreResult:
     deonto_alert = False
     deonto_reason = ""
     if data.has_formal_refusal:
-        return ScoreResult(total=0,level="bloque",level_color="black",breakdown={"deontologie":"BLOQUE — Refus explicite"},deonto_alert=True,deonto_reason="Refus explicite. Toute approche est interdite (RIN Art. 161).")
+        return ScoreResult(total=0,level="bloque",level_color="black",breakdown={"deontologie":"BLOQUE - Refus explicite"},deonto_alert=True,deonto_reason="Refus explicite. Toute approche est interdite (RIN Art. 161).")
     if data.nb_contacts >= 3 and not data.has_consent:
         deonto_alert = True
         deonto_reason = f"{data.nb_contacts} contacts sans consentement. Vérifiez la conformité déontologique."
@@ -72,10 +72,10 @@ def score_prospect(data: ProspectData) -> ScoreResult:
     breakdown["capital_social"] = {"pts": pts, "max": 10, "detail": detail}
     total += pts
     proc = data.bodacc_procedure
-    if proc=="sauvegarde": pts,detail=15,"Procédure sauvegarde — besoin urgent avocat"
+    if proc=="sauvegarde": pts,detail=15,"Procédure sauvegarde - besoin urgent avocat"
     elif proc=="redressement": pts,detail=12,"Redressement judiciaire"
     elif proc=="cession": pts,detail=10,"Cession d'activité"
-    elif proc=="liquidation": pts,detail=0,"Liquidation — risque non-recouvrement"
+    elif proc=="liquidation": pts,detail=0,"Liquidation - risque non-recouvrement"
     else: pts,detail=8,"Aucune procédure (situation saine)"
     breakdown["bodacc"] = {"pts": pts, "max": 15, "detail": detail}
     total += pts
