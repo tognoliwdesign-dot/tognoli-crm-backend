@@ -1,4 +1,4 @@
-"""LEXARYS — Authentification JWT"""
+"""LEXARYS - Authentification JWT"""
 import os
 from datetime import datetime, timedelta
 from typing import Optional
