@@ -1,4 +1,4 @@
-"""LEXARYS — Moteur conflits d'intérêts (Art. 4 RIN)"""
+"""LEXARYS - Moteur conflits d'intérêts (Art. 4 RIN)"""
 import re
 from difflib import SequenceMatcher
 from dataclasses import dataclass
