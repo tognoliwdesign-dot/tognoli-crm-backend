@@ -1,4 +1,4 @@
-"""LEXARYS - Routes Conflits d'Interets (Art. 4 RIN)"""
+"""LEXARYS — Routes Vérification Conflits d'Intérêts (Art. 4 RIN)"""
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime
 from database import supabase
@@ -8,67 +8,115 @@ from conflict_engine import ConflictEngine, EntityToCheck, RegisteredEntity, con
 
 router = APIRouter(prefix="/conflicts", tags=["conflicts"])
 
-def _load_cabinet_entities(user_id: str):
+
+def _load_cabinet_entities(user_id: str) -> list:
+    """
+    Charge toutes les entités enregistrées du cabinet :
+    - Clients actifs et anciens
+    - Parties adverses dans les dossiers
+    """
     entities = []
-    # Filtre obligatoire par user_id (isolation multi-tenant RIN Art. 4)
-    clients = supabase.table("clients").select("id,company_name,last_name,first_name,siren,siret,status").eq("user_id", user_id).execute()
+
+    # Clients du cabinet
+    clients = supabase.table("clients").select("id,company_name,last_name,first_name,siren,siret,status").execute()
     for c in (clients.data or []):
         name = c.get("company_name") or f"{c.get('last_name','')} {c.get('first_name','')}".strip()
-        if not name: continue
+        if not name:
+            continue
         entity_type = "client_actuel" if c.get("status") == "actif" else "client_ancien"
-        entities.append(RegisteredEntity(id=c["id"], name=name, entity_type=entity_type, siren=c.get("siren"), siret=c.get("siret")))
-    dossiers = supabase.table("dossiers").select("id,partie_adverse_name,partie_adverse_siren").eq("user_id", user_id).execute()
+        entities.append(RegisteredEntity(
+            id=c["id"],
+            name=name,
+            entity_type=entity_type,
+            siren=c.get("siren"),
+            siret=c.get("siret"),
+        ))
+
+    # Parties adverses dans les dossiers
+    dossiers = supabase.table("dossiers").select("id,reference,partie_adverse_name,partie_adverse_siret").not_.is_("partie_adverse_name", "null").execute()
     for d in (dossiers.data or []):
-        name = d.get("partie_adverse_name", "")
-        if not name: continue
-        entities.append(RegisteredEntity(id=d["id"], name=name, entity_type="partie_adverse", siren=d.get("partie_adverse_siren")))
+        pa_name = d.get("partie_adverse_name")
+        if not pa_name:
+            continue
+        entities.append(RegisteredEntity(
+            id=d["id"],
+            name=pa_name,
+            entity_type="partie_adverse",
+            siret=d.get("partie_adverse_siret"),
+            dossier_ref=d.get("reference"),
+        ))
+
     return entities
 
+
 @router.post("/check")
-async def check_conflict(req: ConflictCheckRequest, user=Depends(get_current_user)):
+async def check_conflict(body: ConflictCheckRequest, user=Depends(get_current_user)):
+    """
+    Vérifie les conflits d'intérêts pour une entité donnée.
+    Résultat : vert / orange / rouge + détail des matches
+    """
     entities = _load_cabinet_entities(user["id"])
     engine = ConflictEngine(entities)
-    to_check = EntityToCheck(
-        name=req.entity_name,
-        siren=req.siren,
-        siret=req.siret,
-        entity_type=req.entity_type or "unknown"
+
+    entity = EntityToCheck(
+        name=body.entity_name,
+        siren=body.siren,
+        siret=body.siret,
     )
-    result = engine.check(to_check)
+    result = engine.check(entity)
     result_dict = conflict_result_to_dict(result)
-    # Enregistrer la verification en base
-    supabase.table("conflict_checks").insert({
+
+    # Sauvegarde automatique dans le journal
+    check_record = {
         "checked_by": user["id"],
-        "checked_entity_name": req.entity_name,
-        "checked_entity_siren": req.siren,
-        "checked_entity_siret": req.siret,
-        "checked_entity_type": req.entity_type or "unknown",
-        "result": result_dict.get("verdict", "clear"),
-        "conflicts_found": len(result_dict.get("conflicts", [])),
-        "checked_at": datetime.utcnow().isoformat()
-    }).execute()
-    return result_dict
+        "checked_entity_name": body.entity_name,
+        "checked_entity_siren": body.siren,
+        "checked_entity_siret": body.siret,
+        "checked_entity_type": body.entity_type,
+        "result": result.result,
+        "conflicts_found": result_dict["conflicts"],
+        "checked_at": datetime.utcnow().isoformat(),
+    }
+    saved = supabase.table("conflict_checks").insert(check_record).execute()
+    check_id = saved.data[0]["id"] if saved.data else None
+
+    return {**result_dict, "check_id": check_id}
+
 
 @router.get("/history")
-async def conflict_history(user=Depends(get_current_user)):
-    rows = supabase.table("conflict_checks").select("*").eq("checked_by", user["id"]).order("checked_at", desc=True).limit(50).execute()
-    return rows.data or []
+async def conflict_history(limit: int = 50, user=Depends(get_current_user)):
+    """Historique des vérifications de conflits du cabinet."""
+    result = supabase.table("conflict_checks").select("*").order("checked_at", desc=True).limit(limit).execute()
+    return result.data or []
+
 
 @router.put("/decision")
-async def record_decision(dec: ConflictDecision, user=Depends(get_current_user)):
-    supabase.table("conflict_checks").update({
-        "decision": dec.decision,
-        "decision_notes": dec.notes,
-        "decision_at": datetime.utcnow().isoformat()
-    }).eq("id", dec.check_id).eq("checked_by", user["id"]).execute()
-    return {"ok": True}
+async def record_decision(body: ConflictDecision, user=Depends(get_current_user)):
+    """Enregistre la décision de l'avocat suite à une vérification de conflit."""
+    update = {
+        "decision": body.decision,
+        "decision_notes": body.notes,
+        "decision_at": datetime.utcnow().isoformat(),
+    }
+    result = supabase.table("conflict_checks").update(update).eq("id", body.check_id).execute()
+    if not result.data:
+        raise HTTPException(404, "Vérification introuvable")
+    return result.data[0]
+
 
 @router.get("/stats")
 async def conflict_stats(user=Depends(get_current_user)):
-    rows = supabase.table("conflict_checks").select("result,decision").eq("checked_by", user["id"]).execute()
-    data = rows.data or []
+    """Statistiques des vérifications de conflits."""
+    all_checks = supabase.table("conflict_checks").select("result,decision,checked_at").execute()
+    data = all_checks.data or []
     total = len(data)
-    blocked = sum(1 for r in data if r.get("result") in ("blocked", "conflict"))
-    clear = sum(1 for r in data if r.get("result") == "clear")
-    pending = sum(1 for r in data if not r.get("decision"))
-    return {"total": total, "blocked": blocked, "clear": clear, "pending_decision": pending}
+    return {
+        "total": total,
+        "total_checks": total,
+        "rouge": sum(1 for c in data if c.get("result") == "rouge"),
+        "orange": sum(1 for c in data if c.get("result") == "orange"),
+        "vert": sum(1 for c in data if c.get("result") == "vert"),
+        "refused": sum(1 for c in data if c.get("decision") == "refuse"),
+        "accepted": sum(1 for c in data if c.get("decision") == "accepte"),
+        "pending_decision": sum(1 for c in data if not c.get("decision") and c.get("result") != "vert"),
+    }
