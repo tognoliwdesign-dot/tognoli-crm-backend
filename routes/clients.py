@@ -4,8 +4,14 @@ from database import supabase
 from models import ClientCreate, ClientUpdate
 from auth import get_current_user
 
-
 router = APIRouter(prefix="/clients", tags=["clients"])
+
+# Colonnes valides de la table clients
+CLIENT_COLUMNS = {
+    'client_type', 'company_name', 'last_name', 'first_name', 'siren', 'siret',
+    'email', 'phone', 'address', 'city', 'status', 'since_date',
+    'is_confidential', 'notes', 'user_id'
+}
 
 
 @router.get("")
@@ -19,7 +25,7 @@ async def list_clients(status: str = None, search: str = None, limit: int = 200,
 
 @router.post("")
 async def create_client(body: ClientCreate, user=Depends(get_current_user)):
-    data = body.dict()
+    data = {k: v for k, v in body.model_dump().items() if k in CLIENT_COLUMNS and v is not None}
     data["user_id"] = user["id"]
     if data.get("since_date"): data["since_date"] = str(data["since_date"])
     result = supabase.table("clients").insert(data).execute()
@@ -29,7 +35,7 @@ async def create_client(body: ClientCreate, user=Depends(get_current_user)):
 
 
 @router.get("/{client_id}")
-async def get_client(client_id: int, user=Depends(get_current_user)):
+async def get_client(client_id: str, user=Depends(get_current_user)):
     result = supabase.table("clients").select("*").eq("id", client_id).eq("user_id", user["id"]).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Client non trouve")
@@ -37,11 +43,11 @@ async def get_client(client_id: int, user=Depends(get_current_user)):
 
 
 @router.put("/{client_id}")
-async def update_client(client_id: int, body: ClientUpdate, user=Depends(get_current_user)):
+async def update_client(client_id: str, body: ClientUpdate, user=Depends(get_current_user)):
     existing = supabase.table("clients").select("id").eq("id", client_id).eq("user_id", user["id"]).execute()
     if not existing.data:
         raise HTTPException(status_code=404, detail="Client non trouve")
-    data = {k: v for k, v in body.dict().items() if v is not None}
+    data = {k: v for k, v in body.model_dump().items() if v is not None and k in CLIENT_COLUMNS}
     if "since_date" in data and data["since_date"]: data["since_date"] = str(data["since_date"])
     result = supabase.table("clients").update(data).eq("id", client_id).execute()
     if not result.data:
@@ -50,7 +56,7 @@ async def update_client(client_id: int, body: ClientUpdate, user=Depends(get_cur
 
 
 @router.delete("/{client_id}")
-async def delete_client(client_id: int, user=Depends(get_current_user)):
+async def delete_client(client_id: str, user=Depends(get_current_user)):
     existing = supabase.table("clients").select("id").eq("id", client_id).eq("user_id", user["id"]).execute()
     if not existing.data:
         raise HTTPException(status_code=404, detail="Client non trouve")
