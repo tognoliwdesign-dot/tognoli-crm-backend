@@ -1,103 +1,189 @@
-"""LEXARYS - Routes Prospects"""
+"""LEXARYS -- Routes Prospects (schema DB reel)"""
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime, date
 from database import supabase
 from models import ProspectCreate, ProspectUpdate, ProspectStatusUpdate
 from auth import get_current_user
-from scoring import ProspectData, score_prospect, score_to_dict
 
 router = APIRouter(prefix="/prospects", tags=["prospects"])
 
-def _build_score(p):
-    dc = p.get("date_creation")
-    data = ProspectData(
-        company_name=p.get("company_name",""),
-        naf_code=p.get("naf_code"),
-        effectif_tranche=p.get("effectif_tranche"),
-        forme_juridique=p.get("forme_juridique"),
-        date_creation=date.fromisoformat(dc) if dc else None,
-        capital_social=p.get("capital_social"),
-        bodacc_procedure=p.get("bodacc_procedure"),
-        is_international=p.get("is_international",False),
-        is_multi_site=p.get("is_multi_site",False),
-        has_litigation_history=p.get("has_litigation_history",False),
-        nb_contacts=p.get("nb_contacts",0),
-        has_formal_refusal=p.get("has_formal_refusal",False),
-        has_consent=p.get("consent_obtained",False),
-    )
-    return score_to_dict(score_prospect(data))
+PROSPECT_COLUMNS = {
+    'user_id', 'raison_sociale', 'siren', 'siret', 'forme_juridique',
+    'secteur_activite', 'code_naf', 'adresse', 'code_postal', 'ville',
+    'effectif', 'chiffre_affaires', 'notes', 'source', 'tags',
+    'status', 'priority', 'score', 'score_breakdown', 'score_updated_at',
+    'nb_contacts', 'last_contact_at', 'has_formal_refusal',
+    'consent_obtained', 'consent_date', 'is_international', 'is_multi_site',
+    'has_litigation_history', 'capital_social', 'bodacc_procedure',
+    'contact_name', 'contact_role', 'email', 'phone', 'website',
+    'date_creation', 'assigned_to', 'country', 'updated_at',
+}
+
+API_TO_DB = {
+    'company_name':    'raison_sociale',
+    'address':         'adresse',
+    'postal_code':     'code_postal',
+    'city':            'ville',
+    'naf_code':        'code_naf',
+    'naf_label':       'secteur_activite',
+    'effectif_tranche':'effectif',
+}
+
+DB_TO_API = {v: k for k, v in API_TO_DB.items()}
+
+
+def _to_db(data: dict) -> dict:
+    translated = {}
+    for k, v in data.items():
+        db_key = API_TO_DB.get(k, k)
+        translated[db_key] = v
+    return {k: v for k, v in translated.items() if k in PROSPECT_COLUMNS and v is not None}
+
+
+def _to_api(row: dict) -> dict:
+    if not row:
+        return row
+    result = {}
+    for k, v in row.items():
+        api_key = DB_TO_API.get(k, k)
+        result[api_key] = v
+    if 'raison_sociale' in row and 'company_name' not in result:
+        result['company_name'] = row['raison_sociale']
+    return result
+
 
 @router.get("")
-async def list_prospects(status: str=None, search: str=None, limit: int=200, user=Depends(get_current_user)):
-    q = supabase.table("prospects").select("*")
-    if status: q = q.eq("status", status)
-    if search: q = q.ilike("company_name", f"%{search}%")
-    q = q.order("score", desc=True).limit(limit)
-    return q.execute().data or []
+async def list_prospects(
+    status: str = None,
+    search: str = None,
+    priority: str = None,
+    limit: int = 100,
+    user=Depends(get_current_user)
+):
+    try:
+        q = supabase.table("prospects").select("*").eq("user_id", user["id"])
+        if status:
+            q = q.eq("status", status)
+        if priority:
+            q = q.eq("priority", priority)
+        if search:
+            q = q.ilike("raison_sociale", f"%{search}%")
+        q = q.order("created_at", desc=True).limit(limit)
+        result = q.execute()
+        rows = result.data or []
+        return [_to_api(r) for r in rows]
+    except Exception as e:
+        raise HTTPException(500, f"Erreur liste prospects: {str(e)}")
+
 
 @router.post("")
 async def create_prospect(body: ProspectCreate, user=Depends(get_current_user)):
-    data = body.dict()
-    data["user_id"] = user["id"]
-    if data.get("date_creation"): data["date_creation"] = str(data["date_creation"])
-    sr = _build_score(data)
-    data["score"] = sr["total"]
-    data["score_breakdown"] = sr["breakdown"]
-    data["score_updated_at"] = datetime.utcnow().isoformat()
-    data["deonto_alert"] = sr.get("deonto_alert", False)
-    result = supabase.table("prospects").insert(data).execute()
-    return result.data[0] if result.data else {}
+    try:
+        raw = body.model_dump()
+        raw["user_id"] = user["id"]
+        if raw.get("date_creation"):
+            raw["date_creation"] = str(raw["date_creation"])
+        data = _to_db(raw)
+        result = supabase.table("prospects").insert(data).execute()
+        return _to_api(result.data[0]) if result.data else {}
+    except Exception as e:
+        raise HTTPException(500, f"Erreur creation prospect: {str(e)}")
+
 
 @router.get("/stats")
 async def prospect_stats(user=Depends(get_current_user)):
-    all_p = supabase.table("prospects").select("*").execute()
-    data = all_p.data or []
-    pipeline = {}
-    for p in data:
-        s = p.get("status","nouveau")
-        pipeline[s] = pipeline.get(s,0)+1
-    scores = [p["score"] for p in data if p.get("score",0)>0]
-    return {
-        "total": len(data),
-        "by_status": pipeline,
-        "avg_score": round(sum(scores)/len(scores),1) if scores else 0,
-        "deonto_alerts": sum(1 for p in data if p.get("deonto_alert") or p.get("has_formal_refusal")),
-        "converted": pipeline.get("converti",0),
-    }
+    try:
+        all_p = supabase.table("prospects").select("status,priority,has_formal_refusal,score").eq("user_id", user["id"]).execute()
+        data = all_p.data or []
+        pipeline = {}
+        for p in data:
+            s = p.get("status", "identifie")
+            pipeline[s] = pipeline.get(s, 0) + 1
+        scores = [p["score"] for p in data if p.get("score") and p["score"] > 0]
+        return {
+            "total": len(data),
+            "pipeline": pipeline,
+            "avg_score": round(sum(scores) / len(scores), 1) if scores else 0,
+            "high_priority": sum(1 for p in data if p.get("priority") == "urgent"),
+            "converted": pipeline.get("converti", 0),
+            "deonto_alerts": sum(1 for p in data if p.get("has_formal_refusal")),
+        }
+    except Exception:
+        return {"total": 0, "pipeline": {}, "avg_score": 0, "high_priority": 0, "converted": 0, "deonto_alerts": 0}
+
 
 @router.get("/{prospect_id}")
 async def get_prospect(prospect_id: str, user=Depends(get_current_user)):
-    result = supabase.table("prospects").select("*").eq("id", prospect_id).single().execute()
-    if not result.data: raise HTTPException(404, "Prospect introuvable")
-    return result.data
+    try:
+        result = supabase.table("prospects").select("*").eq("id", prospect_id).eq("user_id", user["id"]).execute()
+        if not result.data:
+            raise HTTPException(404, "Prospect introuvable")
+        return _to_api(result.data[0])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 
 @router.put("/{prospect_id}")
 async def update_prospect(prospect_id: str, body: ProspectUpdate, user=Depends(get_current_user)):
-    data = {k: v for k,v in body.dict().items() if v is not None}
-    data["updated_at"] = datetime.utcnow().isoformat()
-    result = supabase.table("prospects").update(data).eq("id", prospect_id).execute()
-    return result.data[0] if result.data else {}
+    try:
+        raw = {k: v for k, v in body.model_dump().items() if v is not None}
+        raw["updated_at"] = datetime.utcnow().isoformat()
+        data = _to_db(raw)
+        result = supabase.table("prospects").update(data).eq("id", prospect_id).eq("user_id", user["id"]).execute()
+        return _to_api(result.data[0]) if result.data else {}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
-@router.post("/{prospect_id}/rescore")
-async def rescore_prospect(prospect_id: str, user=Depends(get_current_user)):
-    ex = supabase.table("prospects").select("*").eq("id", prospect_id).single().execute()
-    if not ex.data: raise HTTPException(404, "Prospect introuvable")
-    sr = _build_score(ex.data)
-    upd = {"score": sr["total"], "score_breakdown": sr["breakdown"], "score_updated_at": datetime.utcnow().isoformat(), "deonto_alert": sr.get("deonto_alert",False), "updated_at": datetime.utcnow().isoformat()}
-    result = supabase.table("prospects").update(upd).eq("id", prospect_id).execute()
-    return {**(result.data[0] if result.data else {}), "score_detail": sr}
+
+@router.put("/{prospect_id}/status")
+async def update_status(prospect_id: str, body: ProspectStatusUpdate, user=Depends(get_current_user)):
+    try:
+        result = supabase.table("prospects").update({
+            "status": body.status,
+            "updated_at": datetime.utcnow().isoformat()
+        }).eq("id", prospect_id).eq("user_id", user["id"]).execute()
+        return _to_api(result.data[0]) if result.data else {}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 
 @router.post("/{prospect_id}/contact")
-async def log_contact(prospect_id: str, body: dict, user=Depends(get_current_user)):
-    ex = supabase.table("prospects").select("nb_contacts,has_formal_refusal").eq("id", prospect_id).single().execute()
-    if not ex.data: raise HTTPException(404, "Prospect introuvable")
-    if ex.data.get("has_formal_refusal"): raise HTTPException(403, "Prospection bloquée - refus formel enregistré")
-    supabase.table("prospect_contacts").insert({"prospect_id": prospect_id, "user_id": user["id"], "contact_mode": body.get("contact_mode") or body.get("contact_type") or "email", "contact_date": datetime.utcnow().isoformat()}).execute()
-    new_count = (ex.data.get("nb_contacts") or 0)+1
-    supabase.table("prospects").update({"nb_contacts": new_count, "last_contact_at": datetime.utcnow().isoformat(), "updated_at": datetime.utcnow().isoformat()}).eq("id", prospect_id).execute()
-    return {"nb_contacts": new_count}
+async def log_contact(prospect_id: str, contact_type: str, notes: str = None, user=Depends(get_current_user)):
+    try:
+        existing = supabase.table("prospects").select("nb_contacts,has_formal_refusal").eq("id", prospect_id).execute()
+        if not existing.data:
+            raise HTTPException(404, "Prospect introuvable")
+        if existing.data[0].get("has_formal_refusal"):
+            raise HTTPException(403, "Ce prospect a refuse d'etre contacte.")
+        try:
+            supabase.table("prospect_contacts").insert({
+                "prospect_id": prospect_id,
+                "user_id": user["id"],
+                "contact_type": contact_type,
+                "notes": notes,
+                "contact_date": datetime.utcnow().isoformat(),
+            }).execute()
+        except Exception:
+            pass
+        new_count = (existing.data[0].get("nb_contacts") or 0) + 1
+        supabase.table("prospects").update({
+            "nb_contacts": new_count,
+            "last_contact_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }).eq("id", prospect_id).execute()
+        return {"nb_contacts": new_count, "message": "Contact enregistre"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 
 @router.delete("/{prospect_id}")
 async def delete_prospect(prospect_id: str, user=Depends(get_current_user)):
-    supabase.table("prospects").delete().eq("id", prospect_id).execute()
-    return {"deleted": True}
+    try:
+        supabase.table("prospects").delete().eq("id", prospect_id).eq("user_id", user["id"]).execute()
+        return {"deleted": True}
+    except Exception as e:
+        raise HTTPException(500, str(e))
