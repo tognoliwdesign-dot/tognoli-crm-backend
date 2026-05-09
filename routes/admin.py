@@ -55,10 +55,11 @@ async def list_features(user=Depends(get_current_user)):
 @router.get("/users/{user_id}/permissions")
 async def get_user_permissions(user_id: str, admin=Depends(require_admin)):
     """Récupère les features activées pour un utilisateur."""
-    res = supabase.table("users").select("id,email,full_name,role,features_enabled").eq("id", user_id).single().execute()
+    res = supabase.table("users").select("id,email,full_name,role,features_enabled").eq("id", user_id).execute()
     if not res.data:
         raise HTTPException(404, "Utilisateur non trouvé")
-    enabled = res.data.get("features_enabled")
+    row = res.data[0] if isinstance(res.data, list) else res.data
+    enabled = row.get("features_enabled")
     return {
         "user_id": user_id,
         "features_enabled": enabled if enabled is not None else ALL_FEATURE_SLUGS,
@@ -68,9 +69,14 @@ async def get_user_permissions(user_id: str, admin=Depends(require_admin)):
 
 @router.put("/users/{user_id}/permissions")
 async def update_user_permissions(user_id: str, body: dict, admin=Depends(require_admin)):
+    """
+    Met à jour les features activées pour un utilisateur.
+    body: { "features_enabled": ["dashboard", "prospects", ...] }
+    """
     if user_id == admin["id"]:
         raise HTTPException(400, "Impossible de modifier ses propres permissions")
     features = body.get("features_enabled", ALL_FEATURE_SLUGS)
+    # Valider que tous les slugs sont connus
     unknown = [f for f in features if f not in ALL_FEATURE_SLUGS]
     if unknown:
         raise HTTPException(400, f"Fonctionnalités inconnues : {unknown}")
@@ -80,6 +86,7 @@ async def update_user_permissions(user_id: str, body: dict, admin=Depends(requir
 
 @router.get("/me/permissions")
 async def my_permissions(user=Depends(get_current_user)):
+    """Retourne les features activées pour l'utilisateur connecté."""
     if user.get("role") == "admin":
         return {"features_enabled": ALL_FEATURE_SLUGS, "is_admin": True}
     enabled = user.get("features_enabled")
@@ -114,7 +121,7 @@ async def create_user(body: UserCreate, user=Depends(require_admin)):
         "is_active": True,
         "lead_limit": 500,
         "subscription_status": "trial",
-        "features_enabled": ALL_FEATURE_SLUGS,
+        "features_enabled": ALL_FEATURE_SLUGS,  # tout activé par défaut
     }
     result = supabase.table("users").insert(data).execute()
     return result.data[0] if result.data else {}
@@ -122,6 +129,7 @@ async def create_user(body: UserCreate, user=Depends(require_admin)):
 
 @router.post("/create-user")
 async def create_user_alias(body: UserCreate, admin=Depends(require_admin)):
+    """Alias pour POST /admin/users (compatibilité frontend)."""
     existing = supabase.table("users").select("id").eq("email", body.email).execute()
     if existing.data:
         raise HTTPException(400, "Email déjà utilisé")
@@ -153,6 +161,7 @@ async def update_user(user_id: str, body: dict, admin=Depends(require_admin)):
 
 @router.patch("/users/{user_id}")
 async def patch_user(user_id: str, body: dict, admin=Depends(require_admin)):
+    """Alias PATCH pour mise à jour partielle."""
     allowed = {"full_name", "role", "barreau", "email", "is_active", "lead_limit", "subscription_status"}
     data = {k: v for k, v in body.items() if k in allowed}
     if not data:
