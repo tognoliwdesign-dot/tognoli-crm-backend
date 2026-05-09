@@ -1,4 +1,4 @@
-"""LEXARYS — Authentification JWT"""
+"""LEXARYS - Authentification JWT"""
 import os
 from datetime import datetime, timedelta
 from typing import Optional
@@ -37,7 +37,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Token invalide ou expiré",
+        detail="Token invalide ou expire",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
@@ -48,22 +48,27 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     except JWTError:
         raise credentials_exception
 
-    result = supabase.table("users").select("*").eq("id", user_id).single().execute()
-    if not result.data:
+    try:
+        # Utiliser execute() sans single() pour eviter les exceptions
+        result = supabase.table("users").select("*").eq("id", user_id).execute()
+        if not result.data:
+            raise credentials_exception
+        return result.data[0]
+    except HTTPException:
+        raise
+    except Exception:
         raise credentials_exception
-    return result.data
 
 
 @router.post("/login")
 async def login(body: LoginRequest):
-    """Connexion par JSON { email, password }"""
-    result = supabase.table("users").select("*").eq("email", body.email).single().execute()
+    result = supabase.table("users").select("*").eq("email", body.email).execute()
     if not result.data:
         raise HTTPException(status_code=401, detail="Identifiants incorrects")
 
-    user = result.data
+    user = result.data[0]
     if not user.get("is_active", True):
-        raise HTTPException(status_code=401, detail="Compte désactivé")
+        raise HTTPException(status_code=401, detail="Compte desactive")
     if not verify_password(body.password, user.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Identifiants incorrects")
 
@@ -79,16 +84,16 @@ async def login(body: LoginRequest):
             "barreau": user.get("barreau"),
             "lead_limit": user.get("lead_limit", 500),
             "subscription_status": user.get("subscription_status", "trial"),
+            "features_enabled": user.get("features_enabled"),
         }
     }
 
 
 @router.post("/register")
 async def register(body: UserCreate):
-    # Vérifier si l'email existe déjà
     existing = supabase.table("users").select("id").eq("email", body.email).execute()
     if existing.data:
-        raise HTTPException(status_code=400, detail="Email déjà utilisé")
+        raise HTTPException(status_code=400, detail="Email deja utilise")
 
     data = {
         "email": body.email,
