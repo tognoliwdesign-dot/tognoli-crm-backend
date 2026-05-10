@@ -324,17 +324,17 @@ def _fmt_montant(v) -> str:
 async def _load_cabinet_entities() -> list:
     entities = []
     try:
-        r = supabase.table("clients").select("raison_sociale,siren,statut").execute()
+        r = supabase.table("clients").select("company_name,siren,status").execute()
         for c in (r.data or []):
-            if c.get("raison_sociale"):
-                entities.append({"name": c["raison_sociale"], "siren": c.get("siren"), "type": "client_actuel" if c.get("statut") in ("actif", "active", "en_cours") else "client_ancien"})
+            if c.get("company_name"):
+                entities.append({"name": c["company_name"], "siren": c.get("siren"), "type": "client_actuel" if c.get("status") in ("actif", "active", "en_cours") else "client_ancien"})
     except Exception:
         pass
     try:
-        r = supabase.table("dossiers").select("partie_adverse").execute()
+        r = supabase.table("dossiers").select("partie_adverse_name").execute()
         for d in (r.data or []):
-            if d.get("partie_adverse"):
-                entities.append({"name": d["partie_adverse"], "siren": None, "type": "partie_adverse"})
+            if d.get("partie_adverse_name"):
+                entities.append({"name": d["partie_adverse_name"], "siren": None, "type": "partie_adverse"})
     except Exception:
         pass
     return entities
