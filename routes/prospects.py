@@ -16,7 +16,7 @@ PROSPECT_COLUMNS = {
     'consent_obtained', 'consent_date', 'is_international', 'is_multi_site',
     'has_litigation_history', 'capital_social', 'bodacc_procedure',
     'contact_name', 'contact_role', 'email', 'phone', 'website',
-    'date_creation', 'assigned_to', 'country', 'updated_at',
+    'date_creation', 'assigned_to', 'updated_at',
 }
 
 API_TO_DB = {
