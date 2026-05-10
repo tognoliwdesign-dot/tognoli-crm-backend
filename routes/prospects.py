@@ -11,12 +11,10 @@ PROSPECT_COLUMNS = {
     'user_id', 'raison_sociale', 'siren', 'siret', 'forme_juridique',
     'secteur_activite', 'code_naf', 'adresse', 'code_postal', 'ville',
     'effectif', 'chiffre_affaires', 'notes', 'source', 'tags',
-    'status', 'priority', 'score', 'score_breakdown', 'score_updated_at',
-    'nb_contacts', 'last_contact_at', 'has_formal_refusal',
-    'consent_obtained', 'consent_date', 'is_international', 'is_multi_site',
-    'has_litigation_history', 'capital_social', 'bodacc_procedure',
+    'status', 'priority', 'score', 'score_breakdown',
+    'capital_social', 'bodacc_procedure',
     'contact_name', 'contact_role', 'email', 'phone', 'website',
-    'date_creation', 'assigned_to', 'updated_at',
+    'date_creation', 'assigned_to',
 }
 
 API_TO_DB = {
