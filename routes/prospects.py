@@ -11,7 +11,7 @@ PROSPECT_COLUMNS = {
     'user_id', 'raison_sociale', 'siren', 'siret', 'forme_juridique',
     'secteur_activite', 'code_naf', 'adresse', 'code_postal', 'ville',
     'effectif', 'chiffre_affaires', 'notes', 'source', 'tags',
-    'statut', 'priority', 'score', 'score_breakdown',h
+    'statut', 'priority', 'score', 'score_breakdown',
     'capital_social', 'bodacc_procedure',
     'contact_name', 'contact_role', 'email', 'phone', 'website',
     'date_creation', 'assigned_to',
