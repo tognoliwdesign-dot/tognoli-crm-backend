@@ -412,7 +412,7 @@ async def search_and_import(body: dict, user=Depends(get_current_user)):
                 "siret": r.get("siret") or None,
                 "naf_code": r.get("naf_code") or None,
                 "naf_label": r.get("naf_label") or capacite.get("naf_label") or None,
-                "effectif_tranche": r.get("effectif_tranche") or None,
+                "effectif": r.get("effectif_tranche") or None,
                 "forme_juridique": r.get("forme_juridique") or None,
                 "address": r.get("address") or None,
                 "postal_code": r.get("postal_code") or postal_code or None,
