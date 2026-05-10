@@ -83,7 +83,7 @@ async def list_prospects(
             q = q.eq("priority", pr)
         if search:
             q = q.ilike("raison_sociale", f"%{search}%")
-        q = q.order("score", desc=True).order("created_at", desc=True).limit(limit)
+        q = q.order("created_at", desc=True).limit(limit)
         result = q.execute()
         return [_to_api(r) for r in (result.data or [])]
     except Exception as e:
@@ -114,14 +114,22 @@ async def create_prospect(body: ProspectCreate, user=Depends(get_current_user)):
 async def prospect_stats(user=Depends(get_current_user)):
     try:
         all_p = supabase.table("prospects").select(
-            "status,priority,has_formal_refusal,score"
+            "status,priority,has_formal_refusal,score_breakdown"
         ).eq("user_id", user["id"]).execute()
         data = all_p.data or []
         pipeline = {}
         for p in data:
             s = p.get("status", "identifie")
             pipeline[s] = pipeline.get(s, 0) + 1
-        scores = [p["score"] for p in data if p.get("score") and p["score"] > 0]
+        scores = []
+        for p in data:
+            sb = p.get("score_breakdown")
+            if sb:
+                try:
+                    import json
+                    sc = json.loads(sb).get("score", 0) if isinstance(sb, str) else sb.get("score", 0)
+                    if sc: scores.append(sc)
+                except: pass
         urgent = sum(1 for p in data if p.get("priority") == "urgent")
         converti = pipeline.get("converti", 0)
         return {
