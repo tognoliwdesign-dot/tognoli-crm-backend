@@ -19,6 +19,10 @@ PAPPERS_BASE = "https://api.pappers.fr/v2"
 
 async def search_sirene(q: str, postal_code: str = None, naf_code: str = None, limit: int = 10) -> list:
     """Recherche Sirene via l'API publique INSEE, avec fallback data.gouv.fr."""
+    # Valider le code postal : uniquement les codes à 5 chiffres (ex: 69001)
+    # Un code département à 2 chiffres (ex: 69) retourne 0 résultats
+    postal_code_valid = postal_code if (postal_code and len(postal_code.strip()) == 5) else None
+
     params = {
         "q": q,
         "nombre": limit,
@@ -29,8 +33,8 @@ async def search_sirene(q: str, postal_code: str = None, naf_code: str = None, l
             "etatAdministratifUniteLegale"
         ),
     }
-    if postal_code:
-        params["codePostalEtablissement"] = postal_code
+    if postal_code_valid:
+        params["codePostalEtablissement"] = postal_code_valid
     headers = {}
     if SIRENE_TOKEN:
         headers["Authorization"] = f"Bearer {SIRENE_TOKEN}"
@@ -45,7 +49,7 @@ async def search_sirene(q: str, postal_code: str = None, naf_code: str = None, l
                 return _parse_sirene_results(data.get("etablissements", []))
     except Exception:
         pass
-    return await _search_entreprise_api(q, postal_code, limit)
+    return await _search_entreprise_api(q, postal_code_valid, limit)
 
 
 async def _search_entreprise_api(q: str, postal_code: str = None, limit: int = 10) -> list:
