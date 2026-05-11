@@ -440,7 +440,8 @@ async def search_and_import(body: dict, user=Depends(get_current_user)):
 
     return {
         "saved": len(saved), "skipped_existing": len(skipped_existing), "skipped_error": len(skipped_error),
-        "results": saved + skipped_existing, "query": query,
+        "results": saved + skipped_existing,
+        "errors_detail": [{"company": e.get("company_name","?"), "error": e.get("save_error","?")} for e in skipped_error[:3]], "query": query,
         "message": f"{len(saved)} prospect(s) importé(s) — scoring 4 piliers"
             + (f" · {len(skipped_existing)} déjà en base" if skipped_existing else "")
             + (f" · {len(skipped_error)} erreur(s)" if skipped_error else ""),
