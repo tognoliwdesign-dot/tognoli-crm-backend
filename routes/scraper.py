@@ -407,6 +407,7 @@ async def search_and_import(body: dict, user=Depends(get_current_user)):
             declencheurs = scoring.get("declencheurs", [])
             record = {
                 "user_id": user["id"],
+                "raison_sociale": (r.get("company_name") or "—")[:255],
                 "company_name": (r.get("company_name") or "—")[:255],
                 "siren": siren or None,
                 "siret": r.get("siret") or None,
