@@ -1,4 +1,4 @@
-"""LEXARYS - Routes Prospects"""
+—"""LEXARYS - Routes Prospects"""
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime
 from database import supabase
@@ -111,12 +111,12 @@ async def create_prospect(body: ProspectCreate, user=Depends(get_current_user)):
 async def prospect_stats(user=Depends(get_current_user)):
     try:
         all_p = supabase.table("prospects").select(
-            "status,priority,has_formal_refusal,score_breakdown"
+            "statut,priority,score_breakdown"
         ).eq("user_id", user["id"]).execute()
         data = all_p.data or []
         pipeline = {}
         for p in data:
-            s = p.get("status", "identifie")
+            s = p.get("statut", "identifie")
             pipeline[s] = pipeline.get(s, 0) + 1
         scores = []
         for p in data:
@@ -176,7 +176,7 @@ async def update_prospect(prospect_id: str, body: ProspectUpdate, user=Depends(g
 async def update_status(prospect_id: str, body: ProspectStatusUpdate, user=Depends(get_current_user)):
     try:
         result = supabase.table("prospects").update({
-            "status": body.status,
+            "statut": body.status,
             "updated_at": datetime.utcnow().isoformat()
         }).eq("id", prospect_id).eq("user_id", user["id"]).execute()
         return _to_api(result.data[0]) if result.data else {}
@@ -187,7 +187,7 @@ async def update_status(prospect_id: str, body: ProspectStatusUpdate, user=Depen
 @router.post("/{prospect_id}/contact")
 async def log_contact(prospect_id: str, contact_type: str, notes: str = None, user=Depends(get_current_user)):
     try:
-        existing = supabase.table("prospects").select("nb_contacts,has_formal_refusal").eq("id", prospect_id).execute()
+        existing = supabase.table("prospects").select("statut").eq("id", prospect_id).execute()
         if not existing.data:
             raise HTTPException(404, "Prospect introuvable")
         if existing.data[0].get("has_formal_refusal"):
