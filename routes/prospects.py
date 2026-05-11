@@ -1,4 +1,4 @@
-—"""LEXARYS - Routes Prospects"""
+"""LEXARYS - Routes Prospects"""
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime
 from database import supabase
