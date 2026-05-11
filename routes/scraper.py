@@ -408,16 +408,15 @@ async def search_and_import(body: dict, user=Depends(get_current_user)):
             record = {
                 "user_id": user["id"],
                 "raison_sociale": (r.get("company_name") or "—")[:255],
-                "company_name": (r.get("company_name") or "—")[:255],
                 "siren": siren or None,
                 "siret": r.get("siret") or None,
-                "naf_code": r.get("naf_code") or None,
-                "naf_label": r.get("naf_label") or capacite.get("naf_label") or None,
+                "code_naf": r.get("naf_code") or None,
+                "secteur_activite": r.get("naf_label") or capacite.get("naf_label") or None,
                 "effectif": r.get("effectif_tranche") or None,
                 "forme_juridique": r.get("forme_juridique") or None,
-                "address": r.get("address") or None,
-                "postal_code": r.get("postal_code") or postal_code or None,
-                "city": r.get("city") or location or None,
+                "adresse": r.get("address") or None,
+                "code_postal": r.get("postal_code") or postal_code or None,
+                "ville": r.get("city") or location or None,
                 "score": scoring["score"],
                 "score_breakdown": {
                     "solvabilite_color": scoring.get("solvabilite", {}).get("color", "vert"),
@@ -429,7 +428,7 @@ async def search_and_import(body: dict, user=Depends(get_current_user)):
                 },
                 "bodacc_procedure": r.get("bodacc_procedure") or None,
                 "source": "scraping_sirene",
-                "status": "identifie",
+                "statut": "identifie",
                 "priority": "urgent" if scoring["score"] >= 75 else "normal" if scoring["score"] >= 40 else "faible",
             }
             res = supabase.table("prospects").insert(record).execute()
