@@ -12,6 +12,7 @@ from routes.conflicts import router as conflicts_router
 from routes.admin import router as admin_router
 from routes.scraper import router as scraper_router
 from routes.emails import router as emails_router
+from routes.tasks_routes import router as tasks_router
 from services.sirene import search_sirene, get_bodacc, enrich_prospect
 
 @asynccontextmanager
@@ -31,6 +32,7 @@ app.include_router(clients_router)
 app.include_router(dossiers_router)
 app.include_router(conflicts_router)
 app.include_router(admin_router)
+app.include_router(tasks_router)
 app.include_router(scraper_router)
 app.include_router(emails_router)
 
