@@ -442,3 +442,123 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
         raise
     except Exception as e:
         raise HTTPException(500, f"Erreur scoring: {str(e)}")
+
+
+# ============================================================
+# SCRAPING EMAIL — depuis le site web de l'entreprise
+# ============================================================
+
+@router.post("/{prospect_id}/scrape-email")
+async def scrape_prospect_email(prospect_id: str, user=Depends(get_current_user)):
+    """Recupere le site web via recherche-entreprises, scrape la home + pages contact, regex emails."""
+    import httpx, re
+    from datetime import timezone
+
+    try:
+        p = supabase.table("prospects").select("id,siren,raison_sociale,website,email_scrape").eq("id", prospect_id).eq("user_id", user["id"]).single().execute()
+        if not p.data:
+            raise HTTPException(404, "Prospect introuvable")
+        siren = str(p.data.get("siren") or "").strip()
+        existing_website = (p.data.get("website") or "").strip()
+
+        website = existing_website
+        # 1) Si pas de website connu, on demande a recherche-entreprises.api.gouv.fr
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 (Lexarys CRM)"}) as client:
+            if not website and len(siren) == 9 and siren.isdigit():
+                try:
+                    r = await client.get(f"https://recherche-entreprises.api.gouv.fr/search?q={siren}&limite=1")
+                    if r.status_code == 200:
+                        data = r.json()
+                        results = data.get("results") or []
+                        if results:
+                            ets = (results[0].get("matching_etablissements") or [{}])[0]
+                            website = (ets.get("site_internet") or results[0].get("site_internet") or "").strip()
+                except Exception:
+                    pass
+
+            if not website:
+                supabase.table("prospects").update({
+                    "email_scrape_at": datetime.now(timezone.utc).isoformat(),
+                    "email_scrape_source": "no_website",
+                }).eq("id", prospect_id).execute()
+                return {"status":"no_website","email":None,"website":None,"prospect_id":prospect_id,"detail":"Aucun site web trouve pour ce SIREN"}
+
+            # Normalise l'URL
+            if not website.startswith(("http://","https://")):
+                website = "https://" + website
+            # On garde la racine pour generer les variantes
+            from urllib.parse import urlparse
+            parsed = urlparse(website)
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            company_domain = parsed.netloc.lower().replace("www.","")
+
+            # 2) On tente la home + 4 chemins classiques
+            candidates_paths = ["", "/contact", "/contact.html", "/contact-us", "/nous-contacter", "/mentions-legales", "/a-propos"]
+            email_pat = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+            blacklist_domains = {"example.com","domain.com","sentry.io","wixsite.com","wordpress.com","gmail.com","yahoo.fr","hotmail.fr","outlook.fr","gmail.fr","yahoo.com","wix.com","squarespace.com","godaddy.com"}
+            blacklist_emails = {"name@example.com","you@example.com","support@wixpress.com"}
+            generic_prefixes = ("contact","info","hello","bonjour","accueil","commercial","sales","secretariat","direction","cabinet","admin","reception")
+
+            found_emails = []  # list of (email, source_url, score)
+            for path in candidates_paths:
+                url = base + path
+                try:
+                    rr = await client.get(url)
+                    if rr.status_code != 200:
+                        continue
+                    text = rr.text
+                    # Decode mailto: also
+                    for m in re.findall(r"mailto:([^\"'>?#\s]+)", text):
+                        found_emails.append((m.lower().strip(), url, 10))  # high priority
+                    for m in email_pat.findall(text):
+                        em = m.lower().strip()
+                        if em in blacklist_emails: continue
+                        dom = em.split("@",1)[-1]
+                        if dom in blacklist_domains: continue
+                        # Skip image hashes / wiximg / pseudo-emails
+                        if em.endswith((".png",".jpg",".jpeg",".gif",".svg",".webp")): continue
+                        score = 1
+                        if dom == company_domain or dom.endswith("." + company_domain): score += 5
+                        if em.split("@",1)[0] in generic_prefixes: score += 3
+                        found_emails.append((em, url, score))
+                except Exception:
+                    continue
+
+            if not found_emails:
+                supabase.table("prospects").update({
+                    "website_scrape": website,
+                    "email_scrape_at": datetime.now(timezone.utc).isoformat(),
+                    "email_scrape_source": "no_email_on_site",
+                }).eq("id", prospect_id).execute()
+                return {"status":"no_email","email":None,"website":website,"prospect_id":prospect_id,"detail":"Site web atteint mais aucun email trouve"}
+
+            # Deduplique en gardant le meilleur score
+            best = {}
+            for em, src, sc in found_emails:
+                if em not in best or sc > best[em][1]:
+                    best[em] = (src, sc)
+            ranked = sorted(best.items(), key=lambda x: -x[1][1])
+            top_email, (top_src, top_score) = ranked[0]
+
+            # Save
+            supabase.table("prospects").update({
+                "email_scrape": top_email,
+                "email_scrape_source": top_src,
+                "email_scrape_at": datetime.now(timezone.utc).isoformat(),
+                "website_scrape": website,
+            }).eq("id", prospect_id).execute()
+
+            return {
+                "status": "ok",
+                "email": top_email,
+                "email_source_url": top_src,
+                "website": website,
+                "candidates": [{"email":em,"source":src,"score":sc} for em,(src,sc) in ranked[:5]],
+                "total_found": len(best),
+                "prospect_id": prospect_id,
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Erreur scraping email: {str(e)}")
