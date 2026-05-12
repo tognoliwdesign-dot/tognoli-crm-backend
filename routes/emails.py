@@ -237,8 +237,12 @@ async def send_email_to_prospect(prospect_id: str, body: SendEmailBody, user=Dep
         if not s.data:
             raise HTTPException(400, "SMTP non configure — renseignez vos parametres dans Templates -> SMTP")
         st = s.data
-        if not st.get("smtp_email") or not st.get("smtp_app_password"):
-            raise HTTPException(400, "SMTP incomplet — renseignez l'email et le mot de passe d'application")
+        # Au moins UN provider doit etre configure (Brevo, Resend, ou SMTP avec app password)
+        if not st.get("smtp_email"):
+            raise HTTPException(400, "Email expediteur manquant — renseignez votre adresse email dans Modeles email")
+        has_any_provider = bool(st.get("brevo_api_key")) or bool(st.get("resend_api_key")) or bool(st.get("smtp_app_password"))
+        if not has_any_provider:
+            raise HTTPException(400, "Aucun provider d'envoi configure — renseignez soit une cle Brevo (recommande), soit Resend, soit un mot de passe d'application SMTP")
 
         # 7) Ajout signature
         if st.get("smtp_signature"):
@@ -256,7 +260,7 @@ async def send_email_to_prospect(prospect_id: str, body: SendEmailBody, user=Dep
 
         host = st.get("smtp_host") or "smtp.gmail.com"
         port = st.get("smtp_port") or 587
-        password = (st.get("smtp_app_password") or "").replace(" ", "")
+        password = (st.get("smtp_app_password") or "").replace(" ", "")  # peut etre vide si Brevo/Resend seuls
         # Methodes d'envoi par ordre de preference (HTTP > SMTP car Railway bloque souvent SMTP)
         sent_ok = False
         send_method = None
@@ -302,8 +306,8 @@ async def send_email_to_prospect(prospect_id: str, body: SendEmailBody, user=Dep
                     send_error = ("resend", f"HTTP {rr.status_code}: {rr.text[:150]}")
             except Exception as e:
                 send_error = ("resend", str(e))
-        # ==== Methode 3 : SMTP_SSL port 465 ====
-        if not sent_ok:
+        # ==== Methode 3 : SMTP_SSL port 465 (seulement si password configure) ====
+        if not sent_ok and password:
             try:
                 with smtplib.SMTP_SSL(host, 465, timeout=10) as server:
                     server.login(st["smtp_email"], password)
@@ -313,8 +317,8 @@ async def send_email_to_prospect(prospect_id: str, body: SendEmailBody, user=Dep
                 raise HTTPException(401, f"Identifiants SMTP refuses : verifier le mot de passe d'application Google (2FA requis). Detail: {str(e)[:120]}")
             except Exception as e:
                 send_error = ("smtp_ssl", str(e))
-        # ==== Methode 4 : STARTTLS port 587 ====
-        if not sent_ok:
+        # ==== Methode 4 : STARTTLS port 587 (seulement si password configure) ====
+        if not sent_ok and password:
             try:
                 with smtplib.SMTP(host, port or 587, timeout=10) as server:
                     server.ehlo(); server.starttls(); server.ehlo()
