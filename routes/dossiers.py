@@ -11,7 +11,7 @@ router = APIRouter(prefix="/dossiers", tags=["dossiers"])
 DOSSIER_COLUMNS = {
     'user_id', 'client_id', 'reference', 'intitule', 'type_affaire',
     'juridiction', 'statut', 'date_ouverture', 'date_cloture',
-    'description', 'notes', 'partie_adverse', 'created_at',
+    'description', 'notes', 'partie_adverse_name', 'created_at',
 }
 
 API_TO_DB = {
@@ -19,7 +19,7 @@ API_TO_DB = {
     'type_dossier':          'type_affaire',
     'status':                'statut',
     'matiere':               'description',
-    'partie_adverse_name':   'partie_adverse',
+    'partie_adverse_name':   'partie_adverse_name',
     'partie_adverse_siret':  None,
     'description':           'intitule',
     'title':                 'intitule',
