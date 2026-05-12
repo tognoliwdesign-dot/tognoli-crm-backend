@@ -30,7 +30,7 @@ class WatchlistAdd(BaseModel):
     watch_capital: bool = True
     watch_rbe: bool = True
     watch_procedures: bool = True
-    watch_marches_publics: bool = False
+    watch_marches_publics: bool = True
     watch_icpe: bool = False
     watch_score: bool = True
     notes: Optional[str] = None
@@ -369,7 +369,7 @@ async def scan_one(watchlist_id: str, user=Depends(get_current_user)):
     res = supabase.table("sentinel_watchlist").select("*").eq("id", watchlist_id).eq("user_id", user["id"]).execute()
     if not res.data:
         raise HTTPException(404, "Entree introuvable")
-    return await _scan_one(res.data[0], user["id"])
+    return await _scan_one_enhanced(res.data[0], user["id"])
 
 
 @router.post("/scan-all")
@@ -381,7 +381,7 @@ async def scan_all(background: BackgroundTasks, user=Depends(get_current_user)):
     async def run_all():
         for it in items:
             try:
-                await _scan_one(it, user["id"])
+                await _scan_one_enhanced(it, user["id"])
             except Exception:
                 pass
     
