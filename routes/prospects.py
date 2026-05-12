@@ -82,7 +82,27 @@ async def list_prospects(
             q = q.ilike("raison_sociale", f"%{search}%")
         q = q.order("created_at", desc=True).limit(limit)
         result = q.execute()
-        return [_to_api(r) for r in (result.data or [])]
+        rows = result.data or []
+        # Enrichir chaque prospect avec le dernier scoring Lexarys (v_dernier_scoring)
+        if rows:
+            ids = [r["id"] for r in rows if r.get("id")]
+            try:
+                sc = supabase.table("v_dernier_scoring").select(
+                    "prospect_id,score_final,score_normalise,taux_couverture,garde_active,procedure_active,date_calcul,version_algo"
+                ).in_("prospect_id", ids).execute()
+                sc_map = {s["prospect_id"]: s for s in (sc.data or [])}
+                for r in rows:
+                    s = sc_map.get(r.get("id"))
+                    if s:
+                        r["lexarys_score"] = s.get("score_final")
+                        r["lexarys_couverture"] = s.get("taux_couverture")
+                        r["lexarys_garde_active"] = s.get("garde_active")
+                        r["lexarys_procedure_active"] = s.get("procedure_active")
+                        r["lexarys_date_calcul"] = s.get("date_calcul")
+                        r["lexarys_version"] = s.get("version_algo")
+            except Exception:
+                pass  # vue absente ou table scoring non encore creee
+        return [_to_api(r) for r in rows]
     except Exception as e:
         raise HTTPException(500, f"Erreur liste prospects: {str(e)}")
 
