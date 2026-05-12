@@ -282,13 +282,22 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
 
         t0 = time.perf_counter()
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r_re, r_bo = await __import__("asyncio").gather(
+        # Cle de controle TVA FR depuis SIREN
+        siren_int = int(siren)
+        tva_cle = (12 + 3 * (siren_int % 97)) % 97
+        tva_fr = f"{tva_cle:02d}{siren}"
+        raison_q = (p.data.get("raison_sociale") or "").strip()
+        async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "Mozilla/5.0 (Lexarys CRM)"}) as client:
+            tasks = [
                 client.get(f"https://recherche-entreprises.api.gouv.fr/entreprises/{siren}"),
                 client.get("https://bodacc-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/bodacc-a/records",
                     params={"where": f"registre LIKE '%25{siren}%25'", "limit": 50, "order_by": "dateparution DESC"}),
-                return_exceptions=True
-            )
+                client.get(f"https://api.vatcomply.com/vat", params={"vat_number": f"FR{tva_fr}"}, timeout=8.0),
+                client.get(f"https://api.gleif.org/api/v1/lei-records",
+                    params={"filter[entity.legalName]": raison_q, "page[size]": 3} if raison_q else {"page[size]": 0}, timeout=8.0),
+                client.get(f"https://www.orias.fr/search", params={"q": siren}, timeout=8.0),
+            ]
+            r_re, r_bo, r_vies, r_gleif, r_orias = await __import__("asyncio").gather(*tasks, return_exceptions=True)
 
         entreprise = {}
         if not isinstance(r_re, Exception) and r_re.status_code == 200:
@@ -381,6 +390,69 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
 
         # Resultat net (INPI requis)
         signaux.append(sig("resultat_net","Resultat net","capacite",0,15,"indisponible_legitime",raison="Token INPI non configure",source="rne_inpi"))
+
+        # VIES — Validation TVA intracommunautaire FR (vatcomply.com)
+        vies_valid = None
+        vies_label = "TVA intracommunautaire non verifiable"
+        try:
+            if not isinstance(r_vies, Exception) and r_vies.status_code == 200:
+                vd = r_vies.json()
+                vies_valid = bool(vd.get("valid"))
+                if vies_valid:
+                    cname = vd.get("name") or ""
+                    vies_label = f"TVA intracommunautaire FR valide ({cname[:40] if cname else tva_fr})"
+                else:
+                    vies_label = "TVA intracommunautaire FR INVALIDE (entreprise dormante ou radiee)"
+        except Exception:
+            pass
+        if vies_valid is True:
+            signaux.append(sig("vies_tva","Validation TVA UE","stabilite",5,5,"evalue",vies_label,source="recherche_entreprises"))
+        elif vies_valid is False:
+            signaux.append(sig("vies_tva","Validation TVA UE","stabilite",0,5,"evalue",vies_label,source="recherche_entreprises"))
+        else:
+            signaux.append(sig("vies_tva","Validation TVA UE","stabilite",0,5,"indisponible_anormal",raison="API VIES indisponible",source="recherche_entreprises"))
+
+        # GLEIF — LEI (Legal Entity Identifier international)
+        lei_code = None
+        lei_label = "LEI non trouve"
+        try:
+            if not isinstance(r_gleif, Exception) and r_gleif.status_code == 200:
+                gd = r_gleif.json()
+                for rec in (gd.get("data") or []):
+                    attrs = rec.get("attributes", {}) or {}
+                    entity = attrs.get("entity", {}) or {}
+                    reg = (entity.get("registeredAs") or "").strip()
+                    legal_name = (entity.get("legalName", {}) or {}).get("name", "")
+                    # Match SIREN or sub-string of raison
+                    if reg and (reg == siren or reg.endswith(siren) or siren in reg):
+                        lei_code = attrs.get("lei") or rec.get("id")
+                        lei_label = f"LEI : {lei_code} ({legal_name[:40]})"
+                        break
+                    elif raison_q and raison_q.upper()[:25] in (legal_name or "").upper():
+                        lei_code = attrs.get("lei") or rec.get("id")
+                        lei_label = f"LEI probable : {lei_code} ({legal_name[:40]})"
+                        break
+        except Exception:
+            pass
+        if lei_code:
+            signaux.append(sig("lei_gleif","Identifiant LEI","complexite",4,4,"evalue",lei_label,source="recherche_entreprises"))
+        else:
+            signaux.append(sig("lei_gleif","Identifiant LEI","complexite",0,4,"evalue","Pas de LEI declare (entreprise non financiere ou seuil non atteint)",source="recherche_entreprises"))
+
+        # ORIAS — registre intermediaires assurance / credit
+        orias_match = None
+        try:
+            if not isinstance(r_orias, Exception) and r_orias.status_code == 200:
+                ot = r_orias.text or ""
+                # Heuristique: detection de mention SIREN dans la page resultat
+                if siren in ot and ("immatricul" in ot.lower() or "courtier" in ot.lower() or "iobsp" in ot.lower() or "intermediaire" in ot.lower()):
+                    orias_match = True
+        except Exception:
+            pass
+        if orias_match:
+            signaux.append(sig("orias","Registre ORIAS (interm. assurance/credit)","stabilite",2,2,"evalue","Entreprise immatriculee a l'ORIAS (secteur regule)",source="recherche_entreprises"))
+        else:
+            signaux.append(sig("orias","Registre ORIAS","stabilite",0,2,"evalue","Pas dans le registre ORIAS (hors interm. assurance/credit)",source="recherche_entreprises"))
 
         # ── Score normalise ────────────────────────────────────────
         score_norm = round(score_brut/max_appl*100,2) if max_appl>0 else None
