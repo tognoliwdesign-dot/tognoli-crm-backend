@@ -363,14 +363,17 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
 
         # Nb dirigeants (signal de complexite organisationnelle, source: recherche-entreprises)
         nb_dir = len(dirigeants_data) if dirigeants_data else 0
+        # nb_dirigeants INVERSE pour POTENTIEL : peu = sweet spot relation long terme
         if nb_dir == 0:
             signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",0,3,"indisponible_anormal",raison="Aucun dirigeant declare"))
-        elif nb_dir == 1:
-            signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",1,3,"evalue",f"{nb_dir} dirigeant (structure simple)"))
-        elif nb_dir == 2:
-            signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",2,3,"evalue",f"{nb_dir} dirigeants (structure courante)"))
+        elif nb_dir <= 2:
+            signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",3,3,"evalue",f"{nb_dir} dirigeant(s) — structure agile, fort potentiel relation"))
+        elif nb_dir <= 5:
+            signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",2,3,"evalue",f"{nb_dir} dirigeants — gouvernance moyenne, potentiel correct"))
+        elif nb_dir <= 15:
+            signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",1,3,"evalue",f"{nb_dir} dirigeants — comite de direction, counsel probable"))
         else:
-            signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",3,3,"evalue",f"{nb_dir} dirigeants (gouvernance multiple)"))
+            signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",0,3,"evalue",f"{nb_dir} dirigeants — grande organisation, counsel etabli quasi-certain"))
 
         # Conventions collectives
         cc = entreprise.get("conventions_collectives") or []
@@ -381,6 +384,38 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
         # BE et filiales (INPI non configure)
         signaux.append(sig("be_declare","Beneficiaire effectif","complexite",0,5,"indisponible_legitime",raison="Token INPI non configure",source="rne_inpi"))
         signaux.append(sig("filiales","Filiales / groupe","complexite",0,6,"indisponible_legitime",raison="Token INPI non configure",source="rne_inpi"))
+
+        # NEW: detection cabinet avocat dans BODACC (signal de counsel deja en place)
+        bodacc_text_blob = ""
+        try:
+            for rec in bodacc_records[:30]:
+                # Concatenate any text field that may mention legal counsel
+                for k, v in (rec.get("record") or {}).get("fields", {}).items() if isinstance(rec.get("record"), dict) else (rec.items() if isinstance(rec, dict) else []):
+                    if isinstance(v, str):
+                        bodacc_text_blob += " " + v.lower()
+        except Exception:
+            pass
+        # Simpler fallback: just dump all the bodacc_records as JSON string
+        try:
+            import json as _json
+            bodacc_text_blob += " " + _json.dumps(bodacc_records, default=str).lower()
+        except Exception:
+            pass
+        has_cabinet_avocat = False
+        cabinet_match_label = "Aucune mention d'avocat/cabinet dans BODACC"
+        try:
+            patterns = ["cabinet d'avocat", "cabinet d avocat", "scp d'avocats", "avocat au barreau", "maitre ", "maître ", "selarl d'avocats", "selas d'avocats", "ordre des avocats"]
+            for pat in patterns:
+                if pat in bodacc_text_blob:
+                    has_cabinet_avocat = True
+                    cabinet_match_label = f"Mention '{pat}' detectee dans BODACC — counsel deja en place"
+                    break
+        except Exception:
+            pass
+        if has_cabinet_avocat:
+            signaux.append(sig("counsel_existant","Conseil avocat deja present","stabilite",0,3,"evalue",cabinet_match_label,source="bodacc"))
+        else:
+            signaux.append(sig("counsel_existant","Conseil avocat deja present","stabilite",3,3,"evalue","Aucune trace d'avocat-conseil dans BODACC — fort potentiel nouveau mandat",source="bodacc"))
 
         # Procedure collective BODACC
         proc = False
@@ -402,14 +437,15 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
         # Radiation (simplifie)
         signaux.append(sig("radiation","Radiation INSEE","sante",8,8,"evalue","Active (non radiee)","sirene"))
 
-        # Effectif
+        # Effectif SWEET-SPOT pour POTENTIEL long terme (10-100 employes = max, <5 ou >200 = penalise)
         tr = str(entreprise.get("tranche_effectif_salarie") or "")
-        TR_PTS = {"00":2,"01":3,"02":4,"03":5,"11":5,"12":6,"21":7,"22":7,"31":8,"32":8,"41":9,"42":9,"51":10,"52":10,"53":10}
-        TR_LBL = {"00":"0 sal.","01":"1-2","02":"3-5","03":"6-9","11":"10-19","12":"20-49","21":"50-99","22":"100-199","31":"200-249","32":"250-499","41":"500-999","42":"1000+"}
+        # Nouveaux pts: courbe en cloche centree sur 10-100 employes
+        TR_PTS = {"00":3,"01":4,"02":6,"03":8,"11":10,"12":10,"21":9,"22":7,"31":5,"32":3,"41":1,"42":0,"51":0,"52":0,"53":0}
+        TR_LBL_FULL = {"00":"0 sal. (trop petit)","01":"1-2 sal. (petit)","02":"3-5 sal. (petit)","03":"6-9 sal. (correct)","11":"10-19 sal. (sweet spot)","12":"20-49 sal. (sweet spot)","21":"50-99 sal. (sweet spot)","22":"100-199 sal. (limite)","31":"200-249 sal. (counsel etabli probable)","32":"250-499 sal. (counsel etabli)","41":"500-999 sal. (DRH+counsel etabli)","42":"1000+ sal. (counsel etabli)"}
         if tr and tr in TR_PTS:
-            signaux.append(sig("effectif","Effectif salarie","capacite",TR_PTS[tr],10,"evalue",TR_LBL.get(tr,tr)))
+            signaux.append(sig("effectif","Effectif (potentiel)","capacite",TR_PTS[tr],10,"evalue",TR_LBL_FULL.get(tr,tr)))
         else:
-            signaux.append(sig("effectif","Effectif salarie","capacite",0,10,"indisponible_legitime",raison="Non renseigne ou confidentiel"))
+            signaux.append(sig("effectif","Effectif (potentiel)","capacite",0,10,"indisponible_legitime",raison="Non renseigne ou confidentiel"))
 
         # Resultat net (INPI requis)
         signaux.append(sig("resultat_net","Resultat net","capacite",0,15,"indisponible_legitime",raison="Token INPI non configure",source="rne_inpi"))
@@ -456,10 +492,11 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
                         break
         except Exception:
             pass
+        # LEI INVERSE pour POTENTIEL : presence LEI = grosse structure = counsel deja en place
         if lei_code:
-            signaux.append(sig("lei_gleif","Identifiant LEI","complexite",4,4,"evalue",lei_label,source="recherche_entreprises"))
+            signaux.append(sig("lei_gleif","Identifiant LEI","complexite",0,4,"evalue",f"LEI declare {lei_code[:20]} — structure institutionnelle, counsel deja probable",source="recherche_entreprises"))
         else:
-            signaux.append(sig("lei_gleif","Identifiant LEI","complexite",0,4,"evalue","Pas de LEI declare (entreprise non financiere ou seuil non atteint)",source="recherche_entreprises"))
+            signaux.append(sig("lei_gleif","Identifiant LEI","complexite",4,4,"evalue","Pas de LEI declare — structure independante, fort potentiel relation long terme",source="recherche_entreprises"))
 
         # ORIAS — registre intermediaires assurance / credit
         orias_match = None
@@ -471,10 +508,11 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
                     orias_match = True
         except Exception:
             pass
+        # ORIAS INVERSE pour POTENTIEL : etre dans ORIAS = secteur lourdement encadre = counsel etabli
         if orias_match:
-            signaux.append(sig("orias","Registre ORIAS (interm. assurance/credit)","stabilite",2,2,"evalue","Entreprise immatriculee a l'ORIAS (secteur regule)",source="recherche_entreprises"))
+            signaux.append(sig("orias","ORIAS (potentiel)","stabilite",0,2,"evalue","Immatriculee ORIAS — secteur ultra-regule, counsel quasi-certain",source="recherche_entreprises"))
         else:
-            signaux.append(sig("orias","Registre ORIAS","stabilite",0,2,"evalue","Pas dans le registre ORIAS (hors interm. assurance/credit)",source="recherche_entreprises"))
+            signaux.append(sig("orias","ORIAS (potentiel)","stabilite",2,2,"evalue","Pas dans ORIAS — pas de regulation lourde, plus de marge pour nouveau counsel",source="recherche_entreprises"))
 
         # GeoRisques — ICPE
         icpe_count = None
@@ -526,14 +564,15 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
                 decp_count = dd.get("total_count") or len(dd.get("results") or [])
         except Exception:
             pass
+        # DECP INVERSE pour POTENTIEL : beaucoup de marches = avocat-conseil etabli
         if decp_count is None:
-            signaux.append(sig("decp","Marches publics (DECP)","capacite",0,4,"indisponible_anormal",raison="API DECP indisponible"))
+            signaux.append(sig("decp","Marches publics","capacite",2,4,"indisponible_anormal",raison="API DECP indisponible"))
         elif decp_count == 0:
-            signaux.append(sig("decp","Marches publics (DECP)","capacite",0,4,"evalue","Aucun marche public remporte (secteur prive)"))
-        elif decp_count <= 2:
-            signaux.append(sig("decp","Marches publics (DECP)","capacite",2,4,"evalue",f"{decp_count} marche(s) public(s) remporte(s) — clientele publique ponctuelle"))
+            signaux.append(sig("decp","Marches publics","capacite",4,4,"evalue","Aucun marche public — pas de counsel procurement etabli, fort potentiel"))
+        elif decp_count <= 3:
+            signaux.append(sig("decp","Marches publics","capacite",2,4,"evalue",f"{decp_count} marche(s) public(s) — sweet spot besoin counsel ponctuel"))
         else:
-            signaux.append(sig("decp","Marches publics (DECP)","capacite",4,4,"evalue",f"{decp_count} marches publics remportes — clientele publique reguliere"))
+            signaux.append(sig("decp","Marches publics","capacite",0,4,"evalue",f"{decp_count} marches publics — avocat-conseil procurement quasi-certain"))
 
                 # ── Score normalise ────────────────────────────────────────
         score_norm = round(score_brut/max_appl*100,2) if max_appl>0 else None
