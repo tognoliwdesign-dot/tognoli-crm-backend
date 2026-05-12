@@ -736,8 +736,8 @@ async def scrape_prospect_email(prospect_id: str, user=Depends(get_current_user)
                         if r_pj.status_code == 200:
                             # extract emails from page-jaunes HTML
                             pj_pat = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
-                            for em in pj_pat.findall(r_pj.text):
-                                em = em.lower()
+                            for em_raw in pj_pat.findall(r_pj.text):
+                                em = _try_decode_email(em_raw.lower())
                                 if not em.endswith((".png",".jpg",".gif",".svg")) and "@solocal" not in em and "@pagesjaunes" not in em:
                                     pj_emails.append(em)
                     except Exception:
@@ -812,6 +812,35 @@ async def scrape_prospect_email(prospect_id: str, user=Depends(get_current_user)
             # 2) On tente la home + 4 chemins classiques
             candidates_paths = ["", "/contact", "/contact.html", "/contact-us", "/nous-contacter", "/mentions-legales", "/a-propos"]
             email_pat = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+
+            def _rot13(s):
+                """Decode ROT13 obfuscation (used by paris.fr and others)."""
+                out = []
+                for c in s:
+                    if 'a' <= c <= 'z':
+                        out.append(chr((ord(c) - ord('a') + 13) % 26 + ord('a')))
+                    elif 'A' <= c <= 'Z':
+                        out.append(chr((ord(c) - ord('A') + 13) % 26 + ord('A')))
+                    else:
+                        out.append(c)
+                return ''.join(out)
+
+            # Common French TLDs to detect ROT13 hits
+            real_tlds = {".fr", ".com", ".org", ".net", ".eu", ".io", ".co", ".gouv", ".paris", ".bzh"}
+            obfus_tlds = {".se", ".ax", ".we", ".pb", ".bet", ".pbz", ".bet", ".rh", ".ar"}  # ROT13 of fr/com/org/net/eu
+
+            def _try_decode_email(em):
+                """If the email looks ROT13-obfuscated, try to decode it."""
+                if not em or '@' not in em:
+                    return em
+                lo = em.lower()
+                # Detect: TLD is in known obfus list AND email contains no real TLD
+                for ot in obfus_tlds:
+                    if lo.endswith(ot):
+                        decoded = _rot13(em)
+                        if any(decoded.lower().endswith(rt) for rt in real_tlds):
+                            return decoded
+                return em
             blacklist_domains = {"example.com","domain.com","sentry.io","wixsite.com","wordpress.com","gmail.com","yahoo.fr","hotmail.fr","outlook.fr","gmail.fr","yahoo.com","wix.com","squarespace.com","godaddy.com"}
             blacklist_emails = {"name@example.com","you@example.com","support@wixpress.com"}
             generic_prefixes = ("contact","info","hello","bonjour","accueil","commercial","sales","secretariat","direction","cabinet","admin","reception")
@@ -826,9 +855,10 @@ async def scrape_prospect_email(prospect_id: str, user=Depends(get_current_user)
                     text = rr.text
                     # Decode mailto: also
                     for m in re.findall(r"mailto:([^\"'>?#\s]+)", text):
-                        found_emails.append((m.lower().strip(), url, 10))  # high priority
+                        em_m = _try_decode_email(m.lower().strip())
+                        found_emails.append((em_m, url, 10))  # high priority
                     for m in email_pat.findall(text):
-                        em = m.lower().strip()
+                        em = _try_decode_email(m.lower().strip())
                         if em in blacklist_emails: continue
                         dom = em.split("@",1)[-1]
                         if dom in blacklist_domains: continue
