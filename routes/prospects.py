@@ -476,12 +476,45 @@ async def scrape_prospect_email(prospect_id: str, user=Depends(get_current_user)
                 except Exception:
                     pass
 
+            # Fallback: DuckDuckGo HTML search pour deviner le site officiel
+            if not website:
+                raison = (p.data.get("raison_sociale") or "").strip()
+                cp = ""
+                # On essaie une recherche ciblee
+                if raison:
+                    try:
+                        q_search = raison + " site officiel contact"
+                        r_ddg = await client.get("https://html.duckduckgo.com/html/", params={"q": q_search}, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                        if r_ddg.status_code == 200:
+                            # Extraire les URLs candidates avec regex
+                            urls = re.findall(r'href="(https?://[^"]+)"', r_ddg.text)
+                            # Filtres: pas duckduckgo, pas reseau social, pas annuaires
+                            blacklist_hosts = ("duckduckgo.com","duck.com","facebook.com","linkedin.com","twitter.com","x.com","instagram.com","youtube.com","pages-jaunes.fr","pagesjaunes.fr","societe.com","verif.com","manageo.fr","infogreffe.fr","data.gouv.fr","fr.wikipedia.org","wikipedia.org","google.com","amazon.fr","amazon.com","bing.com","leboncoin.fr")
+                            from urllib.parse import unquote
+                            for u in urls:
+                                # DuckDuckGo HTML wrap les URLs dans /l/?uddg=
+                                if "/l/?uddg=" in u:
+                                    m = re.search(r"uddg=([^&]+)", u)
+                                    if m:
+                                        u = unquote(m.group(1))
+                                try:
+                                    pu = urlparse(u)
+                                    h = pu.netloc.lower().replace("www.","")
+                                except Exception:
+                                    continue
+                                if not h or any(h == bh or h.endswith("." + bh) for bh in blacklist_hosts):
+                                    continue
+                                # On garde le premier candidat plausible
+                                website = f"{pu.scheme}://{pu.netloc}"
+                                break
+                    except Exception:
+                        pass
             if not website:
                 supabase.table("prospects").update({
                     "email_scrape_at": datetime.now(timezone.utc).isoformat(),
                     "email_scrape_source": "no_website",
                 }).eq("id", prospect_id).execute()
-                return {"status":"no_website","email":None,"website":None,"prospect_id":prospect_id,"detail":"Aucun site web trouve pour ce SIREN"}
+                return {"status":"no_website","email":None,"website":None,"prospect_id":prospect_id,"detail":"Aucun site web trouve (ni Sirene ni DuckDuckGo)"}
 
             # Normalise l'URL
             if not website.startswith(("http://","https://")):
