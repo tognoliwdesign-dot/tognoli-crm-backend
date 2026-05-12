@@ -52,7 +52,7 @@ class WatchlistUpdate(BaseModel):
 async def fetch_entreprise(siren: str) -> Dict[str, Any]:
     """Recupere la fiche entreprise via recherche-entreprises.api.gouv.fr"""
     async with httpx.AsyncClient(timeout=10.0) as cx:
-        r = await cx.get(API_GOUV, params={"q": siren, "include": "complements,siege,matching_etablissements,dirigeants"})
+        r = await cx.get(API_GOUV, params={"q": siren, "page": 1, "per_page": 1})
         if r.status_code != 200:
             return {}
         data = r.json()
@@ -84,6 +84,30 @@ def snapshot_signature(data: Dict[str, Any]) -> Dict[str, Any]:
     """Extrait une signature stable du fiche entreprise pour diff."""
     if not data:
         return {}
+    siege = data.get("siege") or {}
+    dirs = data.get("dirigeants") or []
+    return {
+        "nom_complet": data.get("nom_complet"),
+        "nom_raison_sociale": data.get("nom_raison_sociale"),
+        "etat_administratif": data.get("etat_administratif"),
+        "nombre_etablissements_ouverts": data.get("nombre_etablissements_ouverts"),
+        "nombre_etablissements": data.get("nombre_etablissements"),
+        "tranche_effectif_salarie": data.get("tranche_effectif_salarie"),
+        "nature_juridique": data.get("nature_juridique"),
+        "categorie_entreprise": data.get("categorie_entreprise"),
+        "date_creation": data.get("date_creation"),
+        "activite_principale": data.get("activite_principale"),
+        "siege_adresse": siege.get("adresse"),
+        "siege_code_postal": siege.get("code_postal"),
+        "siege_commune": siege.get("libelle_commune"),
+        "siege_siret": siege.get("siret"),
+        "dirigeants_count": len(dirs),
+        "dirigeants_noms": sorted([
+            f"{(d.get('nom') or '').upper()} {(d.get('prenoms') or '').upper()}".strip()
+            for d in dirs if isinstance(d, dict)
+        ]),
+        "dirigeants_detail": [{"nom": d.get("nom"), "prenoms": d.get("prenoms"), "qualite": d.get("qualite")} for d in dirs if isinstance(d, dict)][:20],
+    }
     return {
         "etat_administratif": data.get("etat_administratif"),
         "nombre_etablissements_ouverts": data.get("nombre_etablissements_ouverts"),
@@ -334,10 +358,13 @@ async def _scan_one(item: Dict[str, Any], user_id: str) -> Dict[str, Any]:
             }).execute()
         
         # 5. Mise a jour du snapshot
-        supabase.table("sentinel_watchlist").update({
+        _update = {
             "last_snapshot": new_snap,
             "last_scan_at": datetime.utcnow().isoformat(),
-        }).eq("id", item["id"]).execute()
+        }
+        if (not item.get("raison_sociale") or item.get("raison_sociale") == item["siren"]) and new_snap.get("nom_complet"):
+            _update["raison_sociale"] = new_snap.get("nom_complet")
+        supabase.table("sentinel_watchlist").update(_update).eq("id", item["id"]).execute()
         
         # 6. Finir le run
         duration_ms = int((time.time() - started) * 1000)
