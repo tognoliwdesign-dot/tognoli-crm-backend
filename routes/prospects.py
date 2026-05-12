@@ -616,7 +616,74 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
             "score_stabilite":sc_st,"score_complexite":sc_co,"score_sante":sc_sa,"score_capacite":sc_ca,
             "procedure_active":proc,"duree_calcul_ms":duree_ms,"statut_calcul":"ok","date_calcul":now,
         }
-        supabase.table("prospect_scoring").insert(row).execute()
+        # Enrichir la table prospects avec toutes les infos extraites des APIs
+        try:
+            # Mapping des codes nature_juridique vers labels lisibles
+            NJ_LABELS = {
+                "1000":"Entrepreneur individuel","5202":"SCI","5410":"SARL","5499":"SARL","5485":"EURL",
+                "5710":"SAS","5720":"SASU","5800":"SCS","5499":"SARL","5499":"SARL",
+                "5499":"SARL","5505":"SARL associé unique","5520":"SARL coopérative","5710":"SAS",
+                "5499":"SARL","5410":"SARL","5485":"EURL","5800":"SCS","5700":"SA","5499":"SARL",
+                "5710":"SAS","5720":"SASU","5499":"SARL","5499":"SARL","5499":"SARL","5499":"SARL",
+                "5410":"SARL","5499":"SARL","5499":"SARL","5499":"SARL","5485":"EURL",
+                "5710":"SAS","5720":"SASU","9220":"Association loi 1901","9300":"Syndicat",
+                "1300":"Profession libérale","9223":"Association RUP","6540":"SCP","6533":"SELARL","6534":"SELAS",
+                "5910":"SCP","5610":"Société en participation","6220":"GIE",
+                "5485":"EURL","5499":"SARL","5410":"SARL"
+            }
+            nj_code = str(entreprise.get("nature_juridique") or "")
+            forme_juridique_label = NJ_LABELS.get(nj_code, nj_code) if nj_code else None
+
+            # Adresse du siège
+            siege = entreprise.get("siege") or {}
+            adresse_complete = siege.get("adresse") or ""
+            code_postal = siege.get("code_postal") or ""
+            ville = siege.get("libelle_commune") or siege.get("commune") or ""
+            site_internet = siege.get("site_internet") or entreprise.get("site_internet") or None
+
+            # NAF / activité
+            code_naf = entreprise.get("activite_principale") or siege.get("activite_principale") or ""
+            naf_label = entreprise.get("libelle_activite_principale") or siege.get("libelle_activite_principale") or ""
+
+            # Catégorie entreprise (PME/ETI/GE)
+            categorie = entreprise.get("categorie_entreprise") or None
+
+            # Capital social (si disponible dans complements)
+            complements = entreprise.get("complements") or {}
+            capital_social = complements.get("capital") or entreprise.get("capital_social")
+
+            # Date de création
+            date_creation_api = entreprise.get("date_creation") or None
+
+            # Effectif tranche/label
+            tr_eff = str(entreprise.get("tranche_effectif_salarie") or "")
+            TR_LBL_FULL = {"00":"0 sal.","01":"1-2 sal.","02":"3-5 sal.","03":"6-9 sal.","11":"10-19 sal.","12":"20-49 sal.","21":"50-99 sal.","22":"100-199 sal.","31":"200-249 sal.","32":"250-499 sal.","41":"500-999 sal.","42":"1000+ sal."}
+
+            # Construction du payload d'enrichissement (uniquement les champs non vides)
+            enrich = {}
+            if forme_juridique_label: enrich["forme_juridique"] = forme_juridique_label
+            if adresse_complete: enrich["adresse"] = adresse_complete
+            if code_postal: enrich["code_postal"] = code_postal
+            if ville: enrich["ville"] = ville
+            if code_naf: enrich["code_naf"] = code_naf
+            if naf_label: enrich["secteur_activite"] = naf_label
+            if capital_social: enrich["capital_social"] = capital_social
+            if date_creation_api: enrich["date_creation"] = date_creation_api
+            if site_internet and not (p.data.get("website") or "").strip():
+                enrich["website"] = site_internet if site_internet.startswith("http") else "https://" + site_internet
+            # effectif numerique si dispo
+            try:
+                eff_num = int(complements.get("effectif_salarie") or entreprise.get("effectif_salarie") or 0)
+                if eff_num: enrich["effectif"] = eff_num
+            except (ValueError, TypeError):
+                pass
+
+            if enrich:
+                supabase.table("prospects").update(enrich).eq("id", prospect_id).execute()
+        except Exception as _e:
+            print(f"Enrichissement prospect echec: {_e}")
+
+                supabase.table("prospect_scoring").insert(row).execute()
 
         for s in signaux:
             supabase.table("prospect_scoring_signal").insert({
