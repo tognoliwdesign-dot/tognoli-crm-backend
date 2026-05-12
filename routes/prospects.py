@@ -288,6 +288,7 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
         tva_fr = f"{tva_cle:02d}{siren}"
         raison_q = (p.data.get("raison_sociale") or "").strip()
         async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "Mozilla/5.0 (Lexarys CRM)"}) as client:
+            adresse_full = (p.data.get("adresse") or "").strip()
             tasks = [
                 client.get(f"https://recherche-entreprises.api.gouv.fr/search?q={siren}&page=1&per_page=1"),
                 client.get("https://bodacc-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/bodacc-a/records",
@@ -296,8 +297,15 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
                 client.get(f"https://api.gleif.org/api/v1/lei-records",
                     params={"filter[entity.legalName]": raison_q, "page[size]": 3} if raison_q else {"page[size]": 0}, timeout=8.0),
                 client.get(f"https://www.orias.fr/search", params={"q": siren}, timeout=8.0),
+                # API GeoRisques (ICPE) — installations classees pour l'environnement
+                client.get(f"https://georisques.gouv.fr/api/v1/installations_classees", params={"page": 1, "page_size": 1, "search": siren}, timeout=8.0),
+                # API Adresse BAN — validation/geocoding
+                client.get(f"https://api-adresse.data.gouv.fr/search/", params={"q": adresse_full[:200], "limit": 1}, timeout=8.0) if adresse_full else __import__("asyncio").sleep(0, result=None),
+                # API DECP — marches publics (data.economie.gouv.fr)
+                client.get(f"https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/decp-augmente/records",
+                    params={"where": f"titulaire_id_1 = '{siren}' OR titulaire_id_2 = '{siren}'", "limit": 5}, timeout=10.0),
             ]
-            r_re, r_bo, r_vies, r_gleif, r_orias = await __import__("asyncio").gather(*tasks, return_exceptions=True)
+            r_re, r_bo, r_vies, r_gleif, r_orias, r_geor, r_ban, r_decp = await __import__("asyncio").gather(*tasks, return_exceptions=True)
 
         entreprise = {}
         dirigeants_data = []
@@ -468,7 +476,66 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
         else:
             signaux.append(sig("orias","Registre ORIAS","stabilite",0,2,"evalue","Pas dans le registre ORIAS (hors interm. assurance/credit)",source="recherche_entreprises"))
 
-        # ── Score normalise ────────────────────────────────────────
+        # GeoRisques — ICPE
+        icpe_count = None
+        try:
+            if not isinstance(r_geor, Exception) and r_geor.status_code == 200:
+                gd = r_geor.json()
+                icpe_count = (gd.get("total") if isinstance(gd, dict) else None) or len(gd.get("data") or []) if isinstance(gd, dict) else 0
+        except Exception:
+            pass
+        if icpe_count is None:
+            signaux.append(sig("georisques","Installations classees (GeoRisques)","sante",0,3,"indisponible_anormal",raison="API GeoRisques indisponible"))
+        elif icpe_count == 0:
+            signaux.append(sig("georisques","Installations classees (GeoRisques)","sante",3,3,"evalue","Aucune installation classee ICPE detectee (pas de risque environnemental connu)"))
+        else:
+            signaux.append(sig("georisques","Installations classees (GeoRisques)","sante",1,3,"evalue",f"{icpe_count} site(s) ICPE classe(s) — secteur a risque environnemental"))
+
+        # API Adresse BAN — validation adresse
+        ban_score = None
+        ban_label = "Adresse non verifiable"
+        try:
+            if not isinstance(r_ban, Exception) and r_ban is not None and r_ban.status_code == 200:
+                bd = r_ban.json()
+                feats = bd.get("features", []) or []
+                if feats:
+                    ban_score = (feats[0].get("properties", {}) or {}).get("score", 0)
+                    ban_label_full = (feats[0].get("properties", {}) or {}).get("label", "")
+                    if ban_score >= 0.7:
+                        ban_label = f"Adresse validee (BAN, score {int(ban_score*100)}%) : {ban_label_full[:50]}"
+                    elif ban_score >= 0.4:
+                        ban_label = f"Adresse partiellement validee (BAN, score {int(ban_score*100)}%)"
+                    else:
+                        ban_label = f"Adresse peu fiable (BAN, score {int(ban_score*100)}%)"
+        except Exception:
+            pass
+        if ban_score is None:
+            signaux.append(sig("ban_adresse","Validation adresse BAN","stabilite",0,2,"indisponible_anormal",raison="Adresse manquante ou API BAN indisponible"))
+        elif ban_score >= 0.7:
+            signaux.append(sig("ban_adresse","Validation adresse BAN","stabilite",2,2,"evalue",ban_label))
+        elif ban_score >= 0.4:
+            signaux.append(sig("ban_adresse","Validation adresse BAN","stabilite",1,2,"evalue",ban_label))
+        else:
+            signaux.append(sig("ban_adresse","Validation adresse BAN","stabilite",0,2,"evalue",ban_label))
+
+        # DECP — marches publics gagnes
+        decp_count = None
+        try:
+            if not isinstance(r_decp, Exception) and r_decp.status_code == 200:
+                dd = r_decp.json()
+                decp_count = dd.get("total_count") or len(dd.get("results") or [])
+        except Exception:
+            pass
+        if decp_count is None:
+            signaux.append(sig("decp","Marches publics (DECP)","capacite",0,4,"indisponible_anormal",raison="API DECP indisponible"))
+        elif decp_count == 0:
+            signaux.append(sig("decp","Marches publics (DECP)","capacite",0,4,"evalue","Aucun marche public remporte (secteur prive)"))
+        elif decp_count <= 2:
+            signaux.append(sig("decp","Marches publics (DECP)","capacite",2,4,"evalue",f"{decp_count} marche(s) public(s) remporte(s) — clientele publique ponctuelle"))
+        else:
+            signaux.append(sig("decp","Marches publics (DECP)","capacite",4,4,"evalue",f"{decp_count} marches publics remportes — clientele publique reguliere"))
+
+                # ── Score normalise ────────────────────────────────────────
         score_norm = round(score_brut/max_appl*100,2) if max_appl>0 else None
         evalues = sum(1 for s in signaux if s["statut"]=="evalue")
         total_s = len(signaux)
