@@ -810,47 +810,64 @@ async def scrape_prospect_email(prospect_id: str, user=Depends(get_current_user)
                     except Exception:
                         pass
 
-            # Fallback 4: deviner le domaine a partir du nom de l'entreprise
+            # Fallback 4: deviner le domaine via multi-slug + validation stricte (nom de l'entreprise dans le site)
             if not website:
                 raison = (p.data.get("raison_sociale") or "").strip()
                 if raison:
-                    # Generer un slug propre
                     import unicodedata
-                    slug = unicodedata.normalize("NFKD", raison).encode("ascii","ignore").decode("ascii").lower()
-                    slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
-                    # Strip suffixes commerciaux courants
-                    for sfx in ["-sas","-sasu","-sarl","-eurl","-sa","-scp","-snc","-selarl","-sci","-association","-mutuelle"]:
-                        if slug.endswith(sfx): slug = slug[:-len(sfx)]
-                    # Try multiple guesses
-                    for tld in [".fr", ".com", ".org"]:
-                        for prefix in ["", "www."]:
-                            guess = "https://" + prefix + slug + tld
+                    norm = unicodedata.normalize("NFKD", raison).encode("ascii","ignore").decode("ascii").lower()
+                    norm = re.sub(r"[^a-z0-9 ]+", " ", norm)
+                    # Mots a ignorer (formes juridiques, articles, mots vides, mots generiques courants)
+                    STOPWORDS = {"sas","sasu","sarl","eurl","sa","scp","snc","selarl","selas","sci","scea","scop","sce","scl","sccv","association","mutuelle","groupe","group","groupement","societe","entreprise","cabinet","compagnie","etablissements","les","des","la","le","de","du","et","aux","pour","par","sur","sans","france","francais","francaise","international","internationale","national","nationale","europe","europeen","europeenne","services","service","marketing","communication","conseil","etude","etudes","field","sales","buy","management","corp","corporation","ltd","inc","co","sa","sas"}
+                    words = [w for w in norm.split() if len(w) >= 2 and w not in STOPWORDS]
+                    if not words:
+                        # Si tous filtres, garder les premiers mots non-vides
+                        words = [w for w in norm.split() if len(w) >= 2][:3]
+                    candidates = []
+                    if words:
+                        candidates.append(words[0])
+                    if len(words) >= 2:
+                        candidates.append(words[0] + words[1])
+                        candidates.append(words[0] + "-" + words[1])
+                    if len(words) >= 3:
+                        candidates.append(words[0] + words[1] + words[2])
+                        candidates.append("-".join(words[:3]))
+                    candidates.append("".join(words))
+                    candidates.append("-".join(words))
+                    if len(words) >= 2:
+                        acro = "".join(w[0] for w in words[:5])
+                        if len(acro) >= 3: candidates.append(acro)
+                    seen = set(); ordered = []
+                    for c in candidates:
+                        if c and c not in seen and 3 <= len(c) <= 30:
+                            seen.add(c); ordered.append(c)
+                    # Trier les candidates : les plus distinctifs (longs) en premier
+                    ordered.sort(key=lambda c: -len(c))
+                    # Tokens-cles pour valider que le site est bien la bonne entreprise
+                    name_tokens = set(w.lower() for w in words if len(w) >= 4)
+                    if not name_tokens: name_tokens = set(w.lower() for w in words if len(w) >= 3)
+                    tlds = [".fr", ".com", ".eu", ".net", ".org", ".io"]
+                    found_h = False
+                    for cand in ordered[:10]:
+                        if found_h: break
+                        for tld in tlds:
+                            url = "https://" + cand + tld
                             try:
-                                r_g = await client.head(guess, timeout=5.0)
-                                if r_g.status_code < 400:
-                                    website = guess
-                                    break
-                                # Fallback: many sites don't support HEAD, try GET
-                                r_g = await client.get(guess, timeout=5.0)
-                                if r_g.status_code < 400:
-                                    website = guess
-                                    break
+                                r_g = await client.get(url, timeout=6.0, follow_redirects=True)
+                                if r_g.status_code >= 400: continue
+                                body_low = r_g.text[:8000].lower()
+                                parked = ["sedo parking","domain is for sale","this domain is for sale","domain is parked","godaddy","namecheap parking","dan.com","afternic","parked.com","under construction"]
+                                if any(p in body_low for p in parked): continue
+                                if len(r_g.text) < 500: continue
+                                # Validation stricte si slug court ou peu distinctif
+                                if len(cand) < 8 or ("-" not in cand and len(cand) < 12):
+                                    if not any(tk in body_low for tk in name_tokens if len(tk) >= 4):
+                                        continue
+                                website = url
+                                found_h = True
+                                break
                             except Exception:
                                 continue
-                        if website: break
-                    # Try short slug (first word only)
-                    if not website and "-" in slug:
-                        short = slug.split("-")[0]
-                        if len(short) >= 3:
-                            for tld in [".fr", ".com"]:
-                                guess = "https://" + short + tld
-                                try:
-                                    r_g = await client.get(guess, timeout=5.0)
-                                    if r_g.status_code < 400:
-                                        website = guess
-                                        break
-                                except Exception:
-                                    continue
             if not website:
                 # Dernier recours: si Pages Jaunes a remonte un email, on le sauve sans site
                 if pj_emails:
