@@ -683,7 +683,7 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
         except Exception as _e:
             print(f"Enrichissement prospect echec: {_e}")
 
-                supabase.table("prospect_scoring").insert(row).execute()
+        supabase.table("prospect_scoring").insert(row).execute()
 
         for s in signaux:
             supabase.table("prospect_scoring_signal").insert({
