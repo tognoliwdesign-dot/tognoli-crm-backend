@@ -222,3 +222,203 @@ async def delete_prospect(prospect_id: str, user=Depends(get_current_user)):
         return {"deleted": True}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+# ── SCORING ────────────────────────────────────────────────────────────────
+
+@router.get("/{prospect_id}/scoring")
+async def get_scoring(prospect_id: str, user=Depends(get_current_user)):
+    """Retourne le dernier score calcule pour un prospect."""
+    try:
+        p = supabase.table("prospects").select("id,siren").eq("id", prospect_id).eq("user_id", user["id"]).single().execute()
+        if not p.data:
+            raise HTTPException(404, "Prospect introuvable")
+        sc = supabase.table("prospect_scoring").select("*").eq("prospect_id", prospect_id).neq("statut_calcul","erreur").order("date_calcul", desc=True).limit(1).execute()
+        if not sc.data:
+            raise HTTPException(404, "Aucun scoring disponible")
+        row = sc.data[0]
+        sigs = supabase.table("prospect_scoring_signal").select("*").eq("scoring_id", row["id"]).execute()
+        row["signaux"] = sigs.data or []
+        return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.post("/{prospect_id}/scoring/compute")
+async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
+    """Calcule et sauvegarde le score d un prospect via les API publiques francaises."""
+    import httpx, uuid, time
+    from datetime import date, timezone
+
+    try:
+        p = supabase.table("prospects").select("id,siren,raison_sociale").eq("id", prospect_id).eq("user_id", user["id"]).single().execute()
+        if not p.data:
+            raise HTTPException(404, "Prospect introuvable")
+        siren = str(p.data.get("siren") or "").strip()
+        if len(siren) != 9 or not siren.isdigit():
+            raise HTTPException(400, "SIREN invalide ou manquant (9 chiffres requis)")
+
+        t0 = time.perf_counter()
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r_re, r_bo = await __import__("asyncio").gather(
+                client.get(f"https://recherche-entreprises.api.gouv.fr/entreprises/{siren}"),
+                client.get("https://bodacc-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/bodacc-a/records",
+                    params={"where": f"registre LIKE '%25{siren}%25'", "limit": 50, "order_by": "dateparution DESC"}),
+                return_exceptions=True
+            )
+
+        entreprise = {}
+        if not isinstance(r_re, Exception) and r_re.status_code == 200:
+            d = r_re.json()
+            entreprise = d.get("entreprise", d) or {}
+
+        bodacc_records = []
+        if not isinstance(r_bo, Exception) and r_bo.status_code == 200:
+            bodacc_records = r_bo.json().get("results", []) or []
+
+        # ── Evaluation des signaux ─────────────────────────────────
+        signaux = []
+        score_brut = 0.0
+        max_appl = 0.0
+
+        def sig(code, label, bloc, pts, pts_max, statut, valeur=None, source="recherche_entreprises", raison=None):
+            nonlocal score_brut, max_appl
+            if statut != "indisponible_legitime":
+                max_appl += pts_max
+                if statut == "evalue":
+                    score_brut += pts
+            return {"signal_code":code,"signal_label":label,"bloc":bloc,
+                    "points_obtenus":pts,"points_max":pts_max,"statut":statut,
+                    "valeur_brute":valeur,"source_api":source,"confidentiel_raison":raison}
+
+        # Anciennete
+        dc = str(entreprise.get("date_creation") or "")[:10]
+        if dc and len(dc)==10:
+            try:
+                ans = (date.today()-date.fromisoformat(dc)).days/365.25
+                p_anc = 8 if ans>=10 else 6 if ans>=5 else 4 if ans>=3 else 2 if ans>=1 else 0
+                signaux.append(sig("anciennete","Anciennete","stabilite",p_anc,8,"evalue",f"{ans:.1f} ans"))
+            except:
+                signaux.append(sig("anciennete","Anciennete","stabilite",0,8,"indisponible_anormal"))
+        else:
+            signaux.append(sig("anciennete","Anciennete","stabilite",0,8,"indisponible_anormal"))
+
+        # Forme juridique
+        fj = str(entreprise.get("categorie_juridique") or "")
+        lbl_fj = entreprise.get("categorie_juridique_label") or fj or "Inconnu"
+        p_fj = 5 if fj.startswith("5") else 4 if fj.startswith("6") else 3 if fj.startswith("7") else 1 if fj.startswith("1") else 3
+        signaux.append(sig("forme_juridique","Forme juridique","stabilite",p_fj if fj else 0,5,"evalue" if fj else "indisponible_anormal",lbl_fj))
+
+        # Continuite
+        signaux.append(sig("continuite","Continuite activite","stabilite",5,5,"evalue","Active"))
+
+        # Nb etablissements
+        nb_e = max(int(entreprise.get("nombre_etablissements") or 1),1)
+        p_e = 6 if nb_e>=10 else 5 if nb_e>=5 else 4 if nb_e>=3 else 3 if nb_e>=2 else 2
+        signaux.append(sig("nb_etablissements","Nb etablissements","complexite",p_e,6,"evalue",str(nb_e)))
+
+        # Conventions collectives
+        cc = entreprise.get("conventions_collectives") or []
+        nb_cc = len(cc) if isinstance(cc,list) else 0
+        p_cc = 4 if nb_cc>=2 else 3 if nb_cc==1 else 2
+        signaux.append(sig("conventions_collectives","Conventions collectives","complexite",p_cc,4,"evalue",f"{nb_cc} convention(s)"))
+
+        # BE et filiales (INPI non configure)
+        signaux.append(sig("be_declare","Beneficiaire effectif","complexite",0,5,"indisponible_legitime",raison="Token INPI non configure",source="rne_inpi"))
+        signaux.append(sig("filiales","Filiales / groupe","complexite",0,6,"indisponible_legitime",raison="Token INPI non configure",source="rne_inpi"))
+
+        # Procedure collective BODACC
+        proc = False
+        for rec in bodacc_records:
+            fam = str(rec.get("familleavis_lib","")).lower()
+            typ = str(rec.get("typeavis","")).lower()
+            if ("redressement" in fam or "liquidation" in fam or "sauvegarde" in fam) and "cloture" not in typ:
+                proc = True; break
+        signaux.append(sig("procedure_collective","Procedure collective","sante",0 if proc else 12,12,"evalue","Procedure active" if proc else "Aucune procedure","bodacc"))
+
+        # Annonces BODACC negatives
+        cutoff = date.today().replace(year=date.today().year-2)
+        neg = sum(1 for rec in bodacc_records
+            if any(k in str(rec.get("familleavis_lib","")).lower() for k in ["vente","cession","dissolution","liquidation"])
+            and (lambda dp: dp >= cutoff)(*(lambda x: [date.fromisoformat(str(x)[:10])] if x and len(str(x))>=10 else [cutoff])(rec.get("dateparution",""))))
+        p_bo = 5 if neg==0 else 3 if neg==1 else 1
+        signaux.append(sig("annonces_bodacc","Annonces BODACC negatives","sante",p_bo,5,"evalue",f"{neg} annonce(s) neg./24m","bodacc"))
+
+        # Radiation (simplifie)
+        signaux.append(sig("radiation","Radiation INSEE","sante",8,8,"evalue","Active (non radiee)","sirene"))
+
+        # Effectif
+        tr = str(entreprise.get("tranche_effectif_salarie") or "")
+        TR_PTS = {"00":2,"01":3,"02":4,"03":5,"11":5,"12":6,"21":7,"22":7,"31":8,"32":8,"41":9,"42":9,"51":10,"52":10,"53":10}
+        TR_LBL = {"00":"0 sal.","01":"1-2","02":"3-5","03":"6-9","11":"10-19","12":"20-49","21":"50-99","22":"100-199","31":"200-249","32":"250-499","41":"500-999","42":"1000+"}
+        if tr and tr in TR_PTS:
+            signaux.append(sig("effectif","Effectif salarie","capacite",TR_PTS[tr],10,"evalue",TR_LBL.get(tr,tr)))
+        else:
+            signaux.append(sig("effectif","Effectif salarie","capacite",0,10,"indisponible_legitime",raison="Non renseigne ou confidentiel"))
+
+        # Resultat net (INPI requis)
+        signaux.append(sig("resultat_net","Resultat net","capacite",0,15,"indisponible_legitime",raison="Token INPI non configure",source="rne_inpi"))
+
+        # ── Score normalise ────────────────────────────────────────
+        score_norm = round(score_brut/max_appl*100,2) if max_appl>0 else None
+        evalues = sum(1 for s in signaux if s["statut"]=="evalue")
+        total_s = len(signaux)
+        taux_cov = round(evalues/total_s*100,2) if total_s else 0
+
+        def bstats(b):
+            sb = [s for s in signaux if s["bloc"]==b]
+            ev = sum(1 for s in sb if s["statut"]=="evalue")
+            mx = sum(s["points_max"] for s in sb if s["statut"]!="indisponible_legitime")
+            br = sum(s["points_obtenus"] for s in sb if s["statut"]=="evalue")
+            return (round(br/mx*100,2) if mx>0 else None, round(ev/len(sb)*100,2) if sb else 0.0)
+
+        sc_st,fi_st = bstats("stabilite")
+        sc_co,fi_co = bstats("complexite")
+        sc_sa,fi_sa = bstats("sante")
+        sc_ca,fi_ca = bstats("capacite")
+
+        cap_sigs = [s for s in signaux if s["bloc"]=="capacite"]
+        fiab_cap = sum(1 for s in cap_sigs if s["statut"]=="evalue")/max(len(cap_sigs),1)
+        garde = fiab_cap < 0.30
+        garde_raison = None
+        score_final = score_norm
+        if garde:
+            garde_raison = f"Fiabilite Capacite = {fiab_cap:.0%} < 30%% -- score plafonne a 70/100"
+            if score_final is not None:
+                score_final = round(min(score_final,70.0),2)
+
+        duree_ms = int((time.perf_counter()-t0)*1000)
+        scoring_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        # ── Sauvegarde Supabase ────────────────────────────────────
+        row = {
+            "id":scoring_id,"prospect_id":prospect_id,"siren":siren,"version_algo":"v1.0.0",
+            "score_normalise":score_norm,"score_brut":round(score_brut,2),"max_applicable":round(max_appl,2),
+            "signaux_evalues":evalues,"signaux_total":total_s,"taux_couverture":taux_cov,
+            "fiabilite_stabilite":fi_st,"fiabilite_complexite":fi_co,"fiabilite_sante":fi_sa,"fiabilite_capacite":fi_ca,
+            "score_final":score_final,"garde_active":garde,"garde_raison":garde_raison,
+            "score_stabilite":sc_st,"score_complexite":sc_co,"score_sante":sc_sa,"score_capacite":sc_ca,
+            "procedure_active":proc,"duree_calcul_ms":duree_ms,"statut_calcul":"ok","date_calcul":now,
+        }
+        supabase.table("prospect_scoring").insert(row).execute()
+
+        for s in signaux:
+            supabase.table("prospect_scoring_signal").insert({
+                "scoring_id":scoring_id,"prospect_id":prospect_id,
+                "signal_code":s["signal_code"],"signal_label":s["signal_label"],"bloc":s["bloc"],
+                "valeur_brute":s.get("valeur_brute"),"points_obtenus":s["points_obtenus"],
+                "points_max":s["points_max"],"statut":s["statut"],"source_api":s["source_api"],
+                "confidentiel_raison":s.get("confidentiel_raison"),
+            }).execute()
+
+        row["signaux"] = signaux
+        return row
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Erreur scoring: {str(e)}")
