@@ -701,7 +701,49 @@ async def scrape_prospect_email(prospect_id: str, user=Depends(get_current_user)
                                 break
                     except Exception:
                         pass
-            # Fallback 2: deviner le domaine a partir du nom de l'entreprise
+            # Fallback 2: Bing search (souvent moins anti-bot que DuckDuckGo depuis serveur)
+            if not website:
+                raison = (p.data.get("raison_sociale") or "").strip()
+                if raison:
+                    try:
+                        bq = raison + " site officiel contact"
+                        r_bing = await client.get("https://www.bing.com/search", params={"q": bq, "cc": "FR"}, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, timeout=8.0)
+                        if r_bing.status_code == 200:
+                            urls = re.findall(r'href="(https?://[^"]+)"', r_bing.text)
+                            blacklist_hosts = ("bing.com","duckduckgo.com","facebook.com","linkedin.com","twitter.com","x.com","instagram.com","youtube.com","pages-jaunes.fr","pagesjaunes.fr","societe.com","verif.com","manageo.fr","infogreffe.fr","data.gouv.fr","fr.wikipedia.org","wikipedia.org","google.com","amazon.fr","amazon.com","leboncoin.fr","go.microsoft.com","msn.com","aka.ms")
+                            for u in urls:
+                                try:
+                                    pu = urlparse(u)
+                                    h = pu.netloc.lower().replace("www.","")
+                                except Exception:
+                                    continue
+                                if not h or any(h == bh or h.endswith("." + bh) for bh in blacklist_hosts):
+                                    continue
+                                website = f"{pu.scheme}://{pu.netloc}"
+                                break
+                    except Exception:
+                        pass
+
+            # Fallback 3: Pages Jaunes recherche pro (souvent expose email directement)
+            pj_emails = []
+            if not website:
+                raison = (p.data.get("raison_sociale") or "").strip()
+                ville = (p.data.get("ville") or "").strip()
+                if raison:
+                    try:
+                        pj_q = raison + (" " + ville if ville else "")
+                        r_pj = await client.get("https://www.pagesjaunes.fr/recherche", params={"quoiqui": pj_q}, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, timeout=8.0)
+                        if r_pj.status_code == 200:
+                            # extract emails from page-jaunes HTML
+                            pj_pat = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+                            for em in pj_pat.findall(r_pj.text):
+                                em = em.lower()
+                                if not em.endswith((".png",".jpg",".gif",".svg")) and "@solocal" not in em and "@pagesjaunes" not in em:
+                                    pj_emails.append(em)
+                    except Exception:
+                        pass
+
+            # Fallback 4: deviner le domaine a partir du nom de l'entreprise
             if not website:
                 raison = (p.data.get("raison_sociale") or "").strip()
                 if raison:
@@ -743,11 +785,20 @@ async def scrape_prospect_email(prospect_id: str, user=Depends(get_current_user)
                                 except Exception:
                                     continue
             if not website:
+                # Dernier recours: si Pages Jaunes a remonte un email, on le sauve sans site
+                if pj_emails:
+                    em = pj_emails[0]
+                    supabase.table("prospects").update({
+                        "email_scrape": em,
+                        "email_scrape_source": "pages-jaunes.fr",
+                        "email_scrape_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", prospect_id).execute()
+                    return {"status":"ok","email":em,"email_source_url":"pages-jaunes.fr","website":None,"candidates":[{"email":e,"source":"pages-jaunes.fr","score":1} for e in pj_emails[:5]],"total_found":len(pj_emails),"prospect_id":prospect_id}
                 supabase.table("prospects").update({
                     "email_scrape_at": datetime.now(timezone.utc).isoformat(),
                     "email_scrape_source": "no_website",
                 }).eq("id", prospect_id).execute()
-                return {"status":"no_website","email":None,"website":None,"prospect_id":prospect_id,"detail":"Aucun site web trouve (Sirene + DuckDuckGo + heuristique domaine)"}
+                return {"status":"no_website","email":None,"website":None,"prospect_id":prospect_id,"detail":"Aucun site web (Sirene + Bing + DuckDuckGo + heuristique) ni Pages Jaunes"}
 
             # Normalise l'URL
             if not website.startswith(("http://","https://")):
@@ -790,13 +841,21 @@ async def scrape_prospect_email(prospect_id: str, user=Depends(get_current_user)
                 except Exception:
                     continue
 
+            # Si rien sur le site, tenter avec les emails recoltes via Pages Jaunes
+            if not found_emails and pj_emails:
+                for em in pj_emails:
+                    dom = em.split("@",1)[-1]
+                    if dom in blacklist_domains: continue
+                    score = 1
+                    if em.split("@",1)[0] in generic_prefixes: score += 3
+                    found_emails.append((em, "pages-jaunes.fr", score))
             if not found_emails:
                 supabase.table("prospects").update({
                     "website_scrape": website,
                     "email_scrape_at": datetime.now(timezone.utc).isoformat(),
                     "email_scrape_source": "no_email_on_site",
                 }).eq("id", prospect_id).execute()
-                return {"status":"no_email","email":None,"website":website,"prospect_id":prospect_id,"detail":"Site web atteint mais aucun email trouve"}
+                return {"status":"no_email","email":None,"website":website,"prospect_id":prospect_id,"detail":"Site web atteint mais aucun email trouve (ni Pages Jaunes)"}
 
             # Deduplique en gardant le meilleur score
             best = {}
