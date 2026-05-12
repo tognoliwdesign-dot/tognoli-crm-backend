@@ -247,15 +247,40 @@ async def send_email_to_prospect(prospect_id: str, body: SendEmailBody, user=Dep
         host = st.get("smtp_host") or "smtp.gmail.com"
         port = st.get("smtp_port") or 587
         password = (st.get("smtp_app_password") or "").replace(" ", "")
+        # Railway bloque souvent les ports 25/587/465 STARTTLS — on essaie plusieurs strategies
+        sent_ok = False
+        send_error = None
+        # Strategy 1: SMTP_SSL port 465 (Railway-friendly)
         try:
-            with smtplib.SMTP(host, port, timeout=20) as server:
-                server.starttls()
+            with smtplib.SMTP_SSL(host, 465, timeout=15) as server:
                 server.login(st["smtp_email"], password)
                 server.send_message(msg)
+            sent_ok = True
         except smtplib.SMTPAuthenticationError as e:
-            raise HTTPException(401, f"SMTP auth refusee : verifier le mot de passe d'application. Detail: {str(e)[:120]}")
+            raise HTTPException(401, f"Identifiants SMTP refuses : verifier le mot de passe d'application Google (2FA requis). Detail: {str(e)[:120]}")
         except Exception as e:
-            raise HTTPException(500, f"Erreur SMTP : {str(e)[:200]}")
+            send_error = ("SSL_465", str(e))
+
+        # Strategy 2: STARTTLS port 587 fallback
+        if not sent_ok:
+            try:
+                with smtplib.SMTP(host, port or 587, timeout=15) as server:
+                    server.ehlo()
+                    server.starttls()
+                    server.ehlo()
+                    server.login(st["smtp_email"], password)
+                    server.send_message(msg)
+                sent_ok = True
+            except smtplib.SMTPAuthenticationError as e:
+                raise HTTPException(401, f"Identifiants SMTP refuses (587). Verifier le mot de passe d'application Google. Detail: {str(e)[:120]}")
+            except Exception as e:
+                send_error = (send_error[0] if send_error else "STARTTLS_587", str(e))
+
+        if not sent_ok:
+            err_msg = "Reseau Railway bloque la connexion vers le serveur SMTP. "
+            err_msg += "Solution conseillee : utiliser un relai SMTP HTTP comme Brevo (sendinblue) ou Resend a la place de Gmail direct. "
+            err_msg += f"(Detail technique : {send_error[1][:120] if send_error else 'unknown'})"
+            raise HTTPException(503, err_msg)
 
         # 9) Mettre a jour le prospect
         supabase.table("prospects").update({
