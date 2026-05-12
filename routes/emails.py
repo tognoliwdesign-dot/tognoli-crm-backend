@@ -28,6 +28,8 @@ class SettingsBody(BaseModel):
     smtp_host: Optional[str] = "smtp.gmail.com"
     smtp_port: Optional[int] = 587
     smtp_provider: Optional[str] = "gmail"
+    brevo_api_key: Optional[str] = None
+    resend_api_key: Optional[str] = None
 
 
 class SendEmailBody(BaseModel):
@@ -103,7 +105,11 @@ async def get_settings(user=Depends(get_current_user)):
             d = r.data[0]
             # Ne pas renvoyer le password en clair, juste indiquer s'il est defini
             d["has_password"] = bool(d.get("smtp_app_password"))
-            d["smtp_app_password"] = None  # masque
+            d["has_brevo"] = bool(d.get("brevo_api_key"))
+            d["has_resend"] = bool(d.get("resend_api_key"))
+            d["smtp_app_password"] = None
+            d["brevo_api_key"] = None
+            d["resend_api_key"] = None
             return d
         return {"user_id": user["id"], "has_password": False, "smtp_provider": "gmail", "smtp_host": "smtp.gmail.com", "smtp_port": 587}
     except Exception as e:
@@ -126,6 +132,10 @@ async def update_settings(body: SettingsBody, user=Depends(get_current_user)):
         # Update password uniquement si fourni (non-vide)
         if body.smtp_app_password:
             payload["smtp_app_password"] = body.smtp_app_password.replace(" ", "")  # Gmail app password sans espaces
+        if body.brevo_api_key:
+            payload["brevo_api_key"] = body.brevo_api_key.strip()
+        if body.resend_api_key:
+            payload["resend_api_key"] = body.resend_api_key.strip()
         if existing.data:
             supabase.table("user_email_settings").update(payload).eq("user_id", user["id"]).execute()
         else:
@@ -247,39 +257,78 @@ async def send_email_to_prospect(prospect_id: str, body: SendEmailBody, user=Dep
         host = st.get("smtp_host") or "smtp.gmail.com"
         port = st.get("smtp_port") or 587
         password = (st.get("smtp_app_password") or "").replace(" ", "")
-        # Railway bloque souvent les ports 25/587/465 STARTTLS — on essaie plusieurs strategies
+        # Methodes d'envoi par ordre de preference (HTTP > SMTP car Railway bloque souvent SMTP)
         sent_ok = False
+        send_method = None
         send_error = None
-        # Strategy 1: SMTP_SSL port 465 (Railway-friendly)
-        try:
-            with smtplib.SMTP_SSL(host, 465, timeout=15) as server:
-                server.login(st["smtp_email"], password)
-                server.send_message(msg)
-            sent_ok = True
-        except smtplib.SMTPAuthenticationError as e:
-            raise HTTPException(401, f"Identifiants SMTP refuses : verifier le mot de passe d'application Google (2FA requis). Detail: {str(e)[:120]}")
-        except Exception as e:
-            send_error = ("SSL_465", str(e))
-
-        # Strategy 2: STARTTLS port 587 fallback
+        brevo_key = (st.get("brevo_api_key") or "").strip()
+        resend_key = (st.get("resend_api_key") or "").strip()
+        # ==== Methode 1 : Brevo HTTP API (300 emails/jour free, fonctionne via Railway) ====
+        if not sent_ok and brevo_key:
+            try:
+                import httpx
+                from_name = (st.get("smtp_signature") or "").split("\n")[0].strip() or "Lexarys CRM"
+                brevo_payload = {
+                    "sender": {"name": from_name, "email": st["smtp_email"]},
+                    "to": [{"email": to_addr}],
+                    "subject": sujet,
+                    "htmlContent": "<html><body>" + corps.replace("\n", "<br>") + "</body></html>",
+                    "textContent": corps,
+                }
+                with httpx.Client(timeout=15.0) as cli:
+                    rb = cli.post("https://api.brevo.com/v3/smtp/email", json=brevo_payload, headers={"api-key": brevo_key, "Content-Type": "application/json"})
+                if rb.status_code in (200, 201):
+                    sent_ok = True; send_method = "brevo"
+                else:
+                    send_error = ("brevo", f"HTTP {rb.status_code}: {rb.text[:150]}")
+            except Exception as e:
+                send_error = ("brevo", str(e))
+        # ==== Methode 2 : Resend HTTP API (3000/mois free) ====
+        if not sent_ok and resend_key:
+            try:
+                import httpx
+                resend_payload = {
+                    "from": st["smtp_email"],
+                    "to": [to_addr],
+                    "subject": sujet,
+                    "html": "<html><body>" + corps.replace("\n", "<br>") + "</body></html>",
+                    "text": corps,
+                }
+                with httpx.Client(timeout=15.0) as cli:
+                    rr = cli.post("https://api.resend.com/emails", json=resend_payload, headers={"Authorization": "Bearer " + resend_key, "Content-Type": "application/json"})
+                if rr.status_code in (200, 201, 202):
+                    sent_ok = True; send_method = "resend"
+                else:
+                    send_error = ("resend", f"HTTP {rr.status_code}: {rr.text[:150]}")
+            except Exception as e:
+                send_error = ("resend", str(e))
+        # ==== Methode 3 : SMTP_SSL port 465 ====
         if not sent_ok:
             try:
-                with smtplib.SMTP(host, port or 587, timeout=15) as server:
-                    server.ehlo()
-                    server.starttls()
-                    server.ehlo()
+                with smtplib.SMTP_SSL(host, 465, timeout=10) as server:
                     server.login(st["smtp_email"], password)
                     server.send_message(msg)
-                sent_ok = True
+                sent_ok = True; send_method = "smtp_ssl_465"
             except smtplib.SMTPAuthenticationError as e:
-                raise HTTPException(401, f"Identifiants SMTP refuses (587). Verifier le mot de passe d'application Google. Detail: {str(e)[:120]}")
+                raise HTTPException(401, f"Identifiants SMTP refuses : verifier le mot de passe d'application Google (2FA requis). Detail: {str(e)[:120]}")
             except Exception as e:
-                send_error = (send_error[0] if send_error else "STARTTLS_587", str(e))
-
+                send_error = ("smtp_ssl", str(e))
+        # ==== Methode 4 : STARTTLS port 587 ====
         if not sent_ok:
-            err_msg = "Reseau Railway bloque la connexion vers le serveur SMTP. "
-            err_msg += "Solution conseillee : utiliser un relai SMTP HTTP comme Brevo (sendinblue) ou Resend a la place de Gmail direct. "
-            err_msg += f"(Detail technique : {send_error[1][:120] if send_error else 'unknown'})"
+            try:
+                with smtplib.SMTP(host, port or 587, timeout=10) as server:
+                    server.ehlo(); server.starttls(); server.ehlo()
+                    server.login(st["smtp_email"], password)
+                    server.send_message(msg)
+                sent_ok = True; send_method = "smtp_starttls"
+            except smtplib.SMTPAuthenticationError as e:
+                raise HTTPException(401, f"Identifiants SMTP refuses sur 587. Detail: {str(e)[:120]}")
+            except Exception as e:
+                send_error = ("starttls", str(e))
+        if not sent_ok:
+            err_msg = "Aucune methode d'envoi n'a fonctionne. "
+            err_msg += "Railway bloque les ports SMTP. SOLUTION : configurer une cle API Brevo (gratuit 300 mails/jour) ou Resend (gratuit 3000/mois) dans Modeles email. "
+            err_msg += f"Detail technique : [{send_error[0] if send_error else 'unknown'}] {send_error[1][:120] if send_error else 'no providers configured'}"
             raise HTTPException(503, err_msg)
 
         # 9) Mettre a jour le prospect
