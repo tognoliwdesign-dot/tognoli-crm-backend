@@ -156,6 +156,10 @@ class VerifyBody(BaseModel):
     verified: bool
 
 
+class EmailBody(BaseModel):
+    email: Optional[str] = None
+
+
 @router.put("/prospects/{prospect_id}/verify")
 async def verify_email(prospect_id: str, body: VerifyBody, user=Depends(get_current_user)):
     try:
@@ -168,6 +172,30 @@ async def verify_email(prospect_id: str, body: VerifyBody, user=Depends(get_curr
         return {"status": "ok", "verified": body.verified}
     except Exception as e:
         raise HTTPException(500, f"Erreur verification: {str(e)}")
+
+
+@router.put("/prospects/{prospect_id}/contact-email")
+async def set_prospect_email(prospect_id: str, body: EmailBody, user=Depends(get_current_user)):
+    """Permet a l'avocat de modifier manuellement l'email de contact du prospect."""
+    try:
+        new_email = (body.email or "").strip()
+        # Validation basique format email
+        if new_email and "@" not in new_email:
+            raise HTTPException(400, "Format d'email invalide")
+        payload = {
+            "email_scrape": new_email if new_email else None,
+            "email_scrape_source": "edition_manuelle" if new_email else None,
+            "email_scrape_at": datetime.now(timezone.utc).isoformat(),
+            # Reset verification si email change
+            "email_verified": False,
+            "email_verified_at": None,
+        }
+        supabase.table("prospects").update(payload).eq("id", prospect_id).eq("user_id", user["id"]).execute()
+        return {"status": "ok", "email": new_email or None}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Erreur mise a jour email: {str(e)}")
 
 
 # ============================================================
