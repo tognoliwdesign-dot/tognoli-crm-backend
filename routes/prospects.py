@@ -289,7 +289,7 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
         raison_q = (p.data.get("raison_sociale") or "").strip()
         async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "Mozilla/5.0 (Lexarys CRM)"}) as client:
             tasks = [
-                client.get(f"https://recherche-entreprises.api.gouv.fr/entreprises/{siren}"),
+                client.get(f"https://recherche-entreprises.api.gouv.fr/search?q={siren}&page=1&per_page=1"),
                 client.get("https://bodacc-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/bodacc-a/records",
                     params={"where": f"registre LIKE '%25{siren}%25'", "limit": 50, "order_by": "dateparution DESC"}),
                 client.get(f"https://api.vatcomply.com/vat", params={"vat_number": f"FR{tva_fr}"}, timeout=8.0),
@@ -300,9 +300,13 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
             r_re, r_bo, r_vies, r_gleif, r_orias = await __import__("asyncio").gather(*tasks, return_exceptions=True)
 
         entreprise = {}
+        dirigeants_data = []
         if not isinstance(r_re, Exception) and r_re.status_code == 200:
             d = r_re.json()
-            entreprise = d.get("entreprise", d) or {}
+            results = d.get("results", []) or []
+            if results:
+                entreprise = results[0] or {}
+                dirigeants_data = entreprise.get("dirigeants") or []
 
         bodacc_records = []
         if not isinstance(r_bo, Exception) and r_bo.status_code == 200:
@@ -348,6 +352,17 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
         nb_e = max(int(entreprise.get("nombre_etablissements") or 1),1)
         p_e = 6 if nb_e>=10 else 5 if nb_e>=5 else 4 if nb_e>=3 else 3 if nb_e>=2 else 2
         signaux.append(sig("nb_etablissements","Nb etablissements","complexite",p_e,6,"evalue",str(nb_e)))
+
+        # Nb dirigeants (signal de complexite organisationnelle, source: recherche-entreprises)
+        nb_dir = len(dirigeants_data) if dirigeants_data else 0
+        if nb_dir == 0:
+            signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",0,3,"indisponible_anormal",raison="Aucun dirigeant declare"))
+        elif nb_dir == 1:
+            signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",1,3,"evalue",f"{nb_dir} dirigeant (structure simple)"))
+        elif nb_dir == 2:
+            signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",2,3,"evalue",f"{nb_dir} dirigeants (structure courante)"))
+        else:
+            signaux.append(sig("nb_dirigeants","Nb dirigeants","complexite",3,3,"evalue",f"{nb_dir} dirigeants (gouvernance multiple)"))
 
         # Conventions collectives
         cc = entreprise.get("conventions_collectives") or []
