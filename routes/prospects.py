@@ -509,12 +509,53 @@ async def scrape_prospect_email(prospect_id: str, user=Depends(get_current_user)
                                 break
                     except Exception:
                         pass
+            # Fallback 2: deviner le domaine a partir du nom de l'entreprise
+            if not website:
+                raison = (p.data.get("raison_sociale") or "").strip()
+                if raison:
+                    # Generer un slug propre
+                    import unicodedata
+                    slug = unicodedata.normalize("NFKD", raison).encode("ascii","ignore").decode("ascii").lower()
+                    slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
+                    # Strip suffixes commerciaux courants
+                    for sfx in ["-sas","-sasu","-sarl","-eurl","-sa","-scp","-snc","-selarl","-sci","-association","-mutuelle"]:
+                        if slug.endswith(sfx): slug = slug[:-len(sfx)]
+                    # Try multiple guesses
+                    for tld in [".fr", ".com", ".org"]:
+                        for prefix in ["", "www."]:
+                            guess = "https://" + prefix + slug + tld
+                            try:
+                                r_g = await client.head(guess, timeout=5.0)
+                                if r_g.status_code < 400:
+                                    website = guess
+                                    break
+                                # Fallback: many sites don't support HEAD, try GET
+                                r_g = await client.get(guess, timeout=5.0)
+                                if r_g.status_code < 400:
+                                    website = guess
+                                    break
+                            except Exception:
+                                continue
+                        if website: break
+                    # Try short slug (first word only)
+                    if not website and "-" in slug:
+                        short = slug.split("-")[0]
+                        if len(short) >= 3:
+                            for tld in [".fr", ".com"]:
+                                guess = "https://" + short + tld
+                                try:
+                                    r_g = await client.get(guess, timeout=5.0)
+                                    if r_g.status_code < 400:
+                                        website = guess
+                                        break
+                                except Exception:
+                                    continue
             if not website:
                 supabase.table("prospects").update({
                     "email_scrape_at": datetime.now(timezone.utc).isoformat(),
                     "email_scrape_source": "no_website",
                 }).eq("id", prospect_id).execute()
-                return {"status":"no_website","email":None,"website":None,"prospect_id":prospect_id,"detail":"Aucun site web trouve (ni Sirene ni DuckDuckGo)"}
+                return {"status":"no_website","email":None,"website":None,"prospect_id":prospect_id,"detail":"Aucun site web trouve (Sirene + DuckDuckGo + heuristique domaine)"}
 
             # Normalise l'URL
             if not website.startswith(("http://","https://")):
