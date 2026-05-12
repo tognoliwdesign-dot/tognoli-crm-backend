@@ -424,13 +424,12 @@ async def compute_scoring(prospect_id: str, user=Depends(get_current_user)):
                     reg = (entity.get("registeredAs") or "").strip()
                     legal_name = (entity.get("legalName", {}) or {}).get("name", "")
                     # Match SIREN or sub-string of raison
-                    if reg and (reg == siren or reg.endswith(siren) or siren in reg):
+                    # Accept STRICT match seulement: SIREN dans registeredAs ET pays France
+                    country = (entity.get("legalAddress", {}) or {}).get("country", "") or (entity.get("headquartersAddress", {}) or {}).get("country", "")
+                    siren_in_reg = reg and (reg == siren or reg.endswith(siren))
+                    if siren_in_reg and (not country or country.upper() == "FR"):
                         lei_code = attrs.get("lei") or rec.get("id")
                         lei_label = f"LEI : {lei_code} ({legal_name[:40]})"
-                        break
-                    elif raison_q and raison_q.upper()[:25] in (legal_name or "").upper():
-                        lei_code = attrs.get("lei") or rec.get("id")
-                        lei_label = f"LEI probable : {lei_code} ({legal_name[:40]})"
                         break
         except Exception:
             pass
