@@ -127,8 +127,15 @@ class ClientUpdate(BaseModel):
 
 # Dossiers
 class DossierCreate(BaseModel):
-    client_id: str
+    client_id: Optional[str] = None
     reference: Optional[str] = None
+    title: Optional[str] = None
+    intitule: Optional[str] = None
+    status: Optional[str] = None
+    type_affaire: Optional[str] = None
+    honoraires_prevus: Optional[float] = None
+    date_cloture: Optional[date] = None
+    notes: Optional[str] = None
     type_dossier: Optional[str] = None
     matiere: Optional[str] = None
     juridiction: Optional[str] = None
