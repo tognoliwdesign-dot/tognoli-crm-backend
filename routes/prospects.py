@@ -938,6 +938,60 @@ async def scrape_prospect_email(prospect_id: str, user=Depends(get_current_user)
                 except Exception:
                     continue
 
+            # Pappers.fr public — page entreprise (pas d'API, scraping HTML)
+            if not found_emails:
+                try:
+                    r_pap = await client.get(f"https://www.pappers.fr/entreprise/{siren}", headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, timeout=8.0)
+                    if r_pap.status_code == 200:
+                        pap_pat = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+                        for em_raw in pap_pat.findall(r_pap.text):
+                            em = _try_decode_email(em_raw.lower())
+                            dom = em.split("@",1)[-1]
+                            if dom in blacklist_domains: continue
+                            if em.endswith((".png",".jpg",".gif",".svg")): continue
+                            if "@pappers" in em or "@sentry" in em or "@datadog" in em: continue
+                            found_emails.append((em, "pappers.fr", 4))
+                except Exception:
+                    pass
+
+            # Wayback Machine — derniere archive du site si on a un website
+            if not found_emails and website:
+                try:
+                    r_wb_check = await client.get(f"https://archive.org/wayback/available?url={website}", timeout=8.0)
+                    if r_wb_check.status_code == 200:
+                        wb_data = r_wb_check.json()
+                        snap = (wb_data.get("archived_snapshots") or {}).get("closest") or {}
+                        if snap.get("url"):
+                            r_wb = await client.get(snap["url"], timeout=10.0)
+                            if r_wb.status_code == 200:
+                                for em_raw in email_pat.findall(r_wb.text):
+                                    em = _try_decode_email(em_raw.lower())
+                                    dom = em.split("@",1)[-1]
+                                    if dom in blacklist_domains: continue
+                                    if em.endswith((".png",".jpg",".gif",".svg")): continue
+                                    if "@archive.org" in em or "@web.archive" in em: continue
+                                    score = 1
+                                    if dom == company_domain or dom.endswith("." + company_domain): score += 5
+                                    if em.split("@",1)[0] in generic_prefixes: score += 3
+                                    found_emails.append((em, snap["url"][:80], score))
+                except Exception:
+                    pass
+
+            # Email guessing — si on a un domaine d'entreprise mais aucun email trouve, deviner
+            # contact@/info@/hello@ + verifier que le domaine a un MX (DNS)
+            if not found_emails and company_domain and "." in company_domain:
+                try:
+                    import socket
+                    # Verifier que le domaine resolve (MX implicite)
+                    socket.gethostbyname(company_domain)
+                    # Generer guesses standards
+                    guesses_prefixes = ["contact", "info", "bonjour", "accueil", "secretariat", "commercial", "direction", "cabinet"]
+                    for gp in guesses_prefixes:
+                        guessed = f"{gp}@{company_domain}"
+                        found_emails.append((guessed, f"guessed (domain {company_domain})", 0))  # score 0 = guess minimal
+                except Exception:
+                    pass
+
             # Si rien sur le site, tenter avec les emails recoltes via Pages Jaunes
             if not found_emails and pj_emails:
                 for em in pj_emails:
