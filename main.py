@@ -11,6 +11,7 @@ from routes.dossiers import router as dossiers_router
 from routes.conflicts import router as conflicts_router
 from routes.admin import router as admin_router
 from routes.scraper import router as scraper_router
+from routes.emails import router as emails_router
 from services.sirene import search_sirene, get_bodacc, enrich_prospect
 
 @asynccontextmanager
@@ -31,6 +32,7 @@ app.include_router(dossiers_router)
 app.include_router(conflicts_router)
 app.include_router(admin_router)
 app.include_router(scraper_router)
+app.include_router(emails_router)
 
 @app.get("/")
 def root(): return {"name": "Lexarys API", "version": "1.0.0", "status": "running"}
