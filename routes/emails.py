@@ -268,9 +268,10 @@ async def send_email_to_prospect(prospect_id: str, body: SendEmailBody, user=Dep
         brevo_key = (st.get("brevo_api_key") or "").strip()
         resend_key = (st.get("resend_api_key") or "").strip()
         # ==== Methode 1 : Brevo HTTP API (300 emails/jour free, fonctionne via Railway) ====
+        all_errors = []
         if not sent_ok and brevo_key:
             try:
-                import httpx
+                import httpx as _httpx_brevo
                 from_name = (st.get("smtp_signature") or "").split("\n")[0].strip() or "Lexarys CRM"
                 brevo_payload = {
                     "sender": {"name": from_name, "email": st["smtp_email"]},
@@ -279,14 +280,17 @@ async def send_email_to_prospect(prospect_id: str, body: SendEmailBody, user=Dep
                     "htmlContent": "<html><body>" + corps.replace("\n", "<br>") + "</body></html>",
                     "textContent": corps,
                 }
-                with httpx.Client(timeout=15.0) as cli:
-                    rb = cli.post("https://api.brevo.com/v3/smtp/email", json=brevo_payload, headers={"api-key": brevo_key, "Content-Type": "application/json"})
+                async with _httpx_brevo.AsyncClient(timeout=15.0) as cli:
+                    rb = await cli.post("https://api.brevo.com/v3/smtp/email", json=brevo_payload, headers={"api-key": brevo_key, "Content-Type": "application/json"})
                 if rb.status_code in (200, 201):
-                    sent_ok = True; send_method = "brevo"
+                    sent_ok = True
+                    send_method = "brevo"
                 else:
-                    send_error = ("brevo", f"HTTP {rb.status_code}: {rb.text[:150]}")
+                    all_errors.append("Brevo HTTP " + str(rb.status_code) + ": " + rb.text[:200])
+                    send_error = ("brevo", "HTTP " + str(rb.status_code))
             except Exception as e:
-                send_error = ("brevo", str(e))
+                all_errors.append("Brevo exception: " + str(e)[:200])
+                send_error = ("brevo", str(e)[:200])
         # ==== Methode 2 : Resend HTTP API (3000/mois free) ====
         if not sent_ok and resend_key:
             try:
@@ -331,8 +335,10 @@ async def send_email_to_prospect(prospect_id: str, body: SendEmailBody, user=Dep
                 send_error = ("starttls", str(e))
         if not sent_ok:
             err_msg = "Aucune methode d'envoi n'a fonctionne. "
-            err_msg += "Railway bloque les ports SMTP. SOLUTION : configurer une cle API Brevo (gratuit 300 mails/jour) ou Resend (gratuit 3000/mois) dans Modeles email. "
-            err_msg += f"Detail technique : [{send_error[0] if send_error else 'unknown'}] {send_error[1][:120] if send_error else 'no providers configured'}"
+            if all_errors:
+                err_msg += "Erreurs detaillees : " + " | ".join(all_errors)
+            else:
+                err_msg += "Aucun provider d'envoi n'a ete configure."
             raise HTTPException(503, err_msg)
 
         # 9) Mettre a jour le prospect
