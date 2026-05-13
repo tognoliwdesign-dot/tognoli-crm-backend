@@ -854,3 +854,286 @@ Genere le {datetime.utcnow().strftime('%d/%m/%Y a %H:%M UTC')}
 <div class="footer">Document confidentiel - Cabinet {cabinet} - Genere par Lexarys Sentinel - Conformite RIN Art. 4</div>
 </body></html>"""
     return HTMLResponse(html)
+
+
+# ============================================
+# ===== OPPORTUNITIES (recherche prospection)
+# ============================================
+
+class OpportunitySearch(BaseModel):
+    event_type: str = "all"  # all | procedure_collective | creation_recente | marche_public | modification_capital | changement_dirigeant
+    departement: Optional[str] = None  # "75", "69", etc.
+    activite_naf: Optional[str] = None  # code NAF style "68.31Z"
+    effectif_min: Optional[int] = None
+    effectif_max: Optional[int] = None
+    days_back: int = 30
+    limit: int = 50
+
+
+async def search_bodacc_opportunities(filter_type: str, dept: Optional[str], days: int, limit: int) -> List[Dict[str, Any]]:
+    """Recupere annonces BODACC selon le type d'evenement (opportunites)."""
+    since = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    params = {
+        "dataset": "annonces-commerciales",
+        "rows": min(limit, 100),
+        "sort": "-dateparution",
+        "refine.dateparution": ">=" + since,
+    }
+    if filter_type == "procedure_collective":
+        params["q"] = "redressement OR liquidation OR sauvegarde"
+    elif filter_type == "modification_capital":
+        params["refine.familleavis"] = "modification"
+    elif filter_type == "cession":
+        params["q"] = "vente OR cession"
+    if dept:
+        params["refine.departement_nom_officiel"] = dept
+    async with httpx.AsyncClient(timeout=15.0) as cx:
+        try:
+            r = await cx.get(BODACC_API, params=params)
+            if r.status_code != 200:
+                return []
+            records = r.json().get("records", [])
+            results = []
+            for rec in records:
+                f = rec.get("fields", {})
+                # Extraire SIREN
+                listep = f.get("listepersonnes", "")
+                # tenter d'extraire SIREN depuis le texte
+                siren_match = re.search(r"(\d{9})", listep + " " + (f.get("publicationavis_facette") or ""))
+                siren = siren_match.group(1) if siren_match else None
+                if not siren:
+                    continue
+                results.append({
+                    "siren": siren,
+                    "raison_sociale": (listep[:200] if listep else ""),
+                    "event_type": filter_type,
+                    "event_title": f.get("typeavis", ""),
+                    "event_description": f.get("publicationavis_facette", "")[:300],
+                    "date_event": f.get("dateparution"),
+                    "departement": f.get("departement_nom_officiel"),
+                    "tribunal": f.get("tribunal"),
+                    "source": "BODACC",
+                    "score_potentiel": 70 if filter_type == "procedure_collective" else 50,
+                })
+            # Deduplication par SIREN
+            seen = set()
+            unique = []
+            for r in results:
+                if r["siren"] not in seen:
+                    seen.add(r["siren"])
+                    unique.append(r)
+            return unique[:limit]
+        except Exception:
+            return []
+
+
+async def search_recent_creations(dept: Optional[str], naf: Optional[str], eff_min: Optional[int], eff_max: Optional[int], days: int, limit: int) -> List[Dict[str, Any]]:
+    """Recherche les entreprises creees recemment via recherche-entreprises.api.gouv.fr"""
+    params = {
+        "per_page": min(limit, 25),
+        "page": 1,
+    }
+    # date_creation_min n'est pas un parametre standard, on filtrera apres
+    if dept:
+        params["code_postal"] = dept + "*"
+    if naf:
+        params["activite_principale"] = naf
+    if eff_min is not None or eff_max is not None:
+        # tranches: 00 (0 sal), 01 (1-2), 02 (3-5), 03 (6-9), 11 (10-19), 12 (20-49), 21 (50-99), 22 (100-199), 31 (200-249), 32 (250-499), 41 (500-999), 42 (1000-1999), 51 (2000-4999), 52 (5000-9999), 53 (10000+)
+        trs = []
+        eff_mapping = [(0,0,"00"),(1,2,"01"),(3,5,"02"),(6,9,"03"),(10,19,"11"),(20,49,"12"),(50,99,"21"),(100,199,"22"),(200,249,"31"),(250,499,"32"),(500,999,"41"),(1000,1999,"42"),(2000,4999,"51"),(5000,9999,"52"),(10000,99999999,"53")]
+        for mn, mx, code in eff_mapping:
+            if (eff_min is None or mx >= eff_min) and (eff_max is None or mn <= eff_max):
+                trs.append(code)
+        if trs:
+            params["tranche_effectif_salarie"] = ",".join(trs)
+    
+    # On veut les plus recentes
+    cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    
+    async with httpx.AsyncClient(timeout=15.0) as cx:
+        try:
+            r = await cx.get(API_GOUV, params=params)
+            if r.status_code != 200:
+                return []
+            results = r.json().get("results", [])
+            out = []
+            for ent in results:
+                date_c = ent.get("date_creation")
+                if date_c and date_c < cutoff:
+                    continue
+                siren = ent.get("siren")
+                if not siren:
+                    continue
+                siege = ent.get("siege") or {}
+                dirs = ent.get("dirigeants") or []
+                # Score preliminaire
+                score = 50
+                if ent.get("nombre_etablissements_ouverts") and ent["nombre_etablissements_ouverts"] > 1:
+                    score += 10
+                if dirs:
+                    score += 5
+                if (ent.get("tranche_effectif_salarie") or "00") not in ("NN", "00"):
+                    score += 10
+                out.append({
+                    "siren": siren,
+                    "raison_sociale": ent.get("nom_complet") or ent.get("nom_raison_sociale", ""),
+                    "event_type": "creation_recente",
+                    "event_title": "Creation recente",
+                    "event_description": f"Cree le {date_c} - {ent.get('activite_principale','')}",
+                    "date_event": date_c,
+                    "ville": siege.get("libelle_commune"),
+                    "adresse": siege.get("adresse"),
+                    "code_postal": siege.get("code_postal"),
+                    "departement": (siege.get("code_postal") or "")[:2] if siege.get("code_postal") else None,
+                    "dirigeants_count": len(dirs),
+                    "activite": ent.get("activite_principale"),
+                    "tranche_effectif": ent.get("tranche_effectif_salarie"),
+                    "source": "Recherche-Entreprises",
+                    "score_potentiel": min(95, score),
+                })
+            return out[:limit]
+        except Exception:
+            return []
+
+
+async def search_marches_publics_recent(dept: Optional[str], days: int, limit: int) -> List[Dict[str, Any]]:
+    """Recherche les marches publics attribues recemment."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as cx:
+            params = {"limit": min(limit, 50)}
+            if dept:
+                params["dept"] = dept
+            r = await cx.get(f"{DECP_API}/marches/recent", params=params)
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            marches = data if isinstance(data, list) else data.get("marches", [])
+            cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+            out = []
+            for m in marches:
+                date_n = m.get("dateNotification") or m.get("datePublicationDonnees")
+                if date_n and date_n < cutoff:
+                    continue
+                titulaires = m.get("titulaires") or []
+                for t in titulaires:
+                    siren = (t.get("id") or "")[:9]
+                    if not siren or not siren.isdigit():
+                        continue
+                    montant = m.get("montant") or 0
+                    try:
+                        montant = float(montant)
+                    except Exception:
+                        montant = 0
+                    score = 60
+                    if montant >= 500000:
+                        score = 75
+                    if montant >= 5000000:
+                        score = 85
+                    out.append({
+                        "siren": siren,
+                        "raison_sociale": t.get("denominationSociale") or t.get("nom", ""),
+                        "event_type": "marche_public",
+                        "event_title": f"Marche public attribue ({int(montant)} EUR)" if montant else "Marche public attribue",
+                        "event_description": (m.get("objet", "") or "")[:300],
+                        "date_event": date_n,
+                        "departement": dept,
+                        "acheteur": (m.get("acheteur") or {}).get("nom") or m.get("acheteurNom", ""),
+                        "montant": montant,
+                        "source": "DECP",
+                        "score_potentiel": score,
+                    })
+            return out[:limit]
+    except Exception:
+        return []
+
+
+@router.post("/opportunities")
+async def search_opportunities(body: OpportunitySearch, user=Depends(get_current_user)):
+    """Recherche d'opportunites commerciales basee sur des evenements recents."""
+    results = []
+    event_type = body.event_type
+    
+    if event_type in ("all", "procedure_collective"):
+        try:
+            r1 = await search_bodacc_opportunities("procedure_collective", body.departement, body.days_back, body.limit)
+            results.extend(r1)
+        except Exception:
+            pass
+    
+    if event_type in ("all", "modification_capital"):
+        try:
+            r2 = await search_bodacc_opportunities("modification_capital", body.departement, body.days_back, body.limit // 2 if event_type == "all" else body.limit)
+            results.extend(r2)
+        except Exception:
+            pass
+    
+    if event_type in ("all", "creation_recente"):
+        try:
+            r3 = await search_recent_creations(body.departement, body.activite_naf, body.effectif_min, body.effectif_max, body.days_back, body.limit // 2 if event_type == "all" else body.limit)
+            results.extend(r3)
+        except Exception:
+            pass
+    
+    if event_type in ("all", "marche_public"):
+        try:
+            r4 = await search_marches_publics_recent(body.departement, body.days_back, body.limit // 2 if event_type == "all" else body.limit)
+            results.extend(r4)
+        except Exception:
+            pass
+    
+    # Croiser avec prospects/clients existants pour exclure ceux deja en base
+    try:
+        existing_prospects = supabase.table("prospects").select("siren").eq("user_id", user["id"]).execute()
+        existing_sirens = set([p.get("siren") for p in (existing_prospects.data or []) if p.get("siren")])
+        existing_clients = supabase.table("clients").select("siren").eq("user_id", user["id"]).execute()
+        for c in (existing_clients.data or []):
+            if c.get("siren"):
+                existing_sirens.add(c["siren"])
+        existing_watch = supabase.table("sentinel_watchlist").select("siren").eq("user_id", user["id"]).execute()
+        watched_sirens = set([w.get("siren") for w in (existing_watch.data or []) if w.get("siren")])
+        
+        for r in results:
+            r["already_prospect"] = r.get("siren") in existing_sirens
+            r["already_watched"] = r.get("siren") in watched_sirens
+    except Exception:
+        pass
+    
+    # Trier par score_potentiel desc, dedupliquer
+    seen = set()
+    unique = []
+    for r in sorted(results, key=lambda x: -(x.get("score_potentiel") or 0)):
+        if r["siren"] not in seen:
+            seen.add(r["siren"])
+            unique.append(r)
+    
+    return {"count": len(unique), "results": unique[:body.limit]}
+
+
+@router.post("/opportunities/convert-to-prospect")
+async def convert_to_prospect(body: Dict[str, Any], user=Depends(get_current_user)):
+    """Convertit une opportunite en prospect."""
+    siren = body.get("siren")
+    if not siren:
+        raise HTTPException(400, "SIREN manquant")
+    # Verifier non-existence
+    existing = supabase.table("prospects").select("id").eq("user_id", user["id"]).eq("siren", siren).execute()
+    if existing.data:
+        return {"already_exists": True, "prospect_id": existing.data[0]["id"]}
+    data = {
+        "user_id": user["id"],
+        "siren": siren,
+        "raison_sociale": body.get("raison_sociale", ""),
+        "ville": body.get("ville"),
+        "adresse": body.get("adresse"),
+        "code_postal": body.get("code_postal"),
+        "activite_principale": body.get("activite"),
+        "statut": "identifie",
+        "priorite": "normal",
+        "notes": f"Source: Sentinel Opportunites - {body.get('event_title','')}\n{body.get('event_description','')}",
+    }
+    try:
+        res = supabase.table("prospects").insert(data).execute()
+        return {"created": True, "prospect": res.data[0] if res.data else None}
+    except Exception as e:
+        raise HTTPException(500, f"Erreur creation prospect : {str(e)}")
